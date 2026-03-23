@@ -18,6 +18,16 @@
     if (s) sessionId = s;
   });
 
+  function ensureSessionId(): string {
+    if (sessionId?.trim()) return sessionId.trim();
+    const id = crypto.randomUUID();
+    sessionId = id;
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(SESSION_KEY, id);
+    }
+    return id;
+  }
+
   async function onUploadAndRun(e: Event) {
     e.preventDefault();
     err = null;
@@ -29,13 +39,18 @@
     busy = true;
     lastIngest = null;
     try {
-      const up = await postTeachUpload(files);
+      const sid = ensureSessionId();
+      const up = await postTeachUpload(files, sid);
+      sessionId = up.sessionId;
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(SESSION_KEY, up.sessionId);
+      }
       lastIngest = { ingestId: up.ingestId, maskedTextChars: up.maskedTextChars };
       const r = await postDocumentTeachTask({
         ingestId: up.ingestId,
         description: description.trim() || undefined,
         focusNote: focusNote.trim() || undefined,
-        sessionId
+        sessionId: up.sessionId
       });
       sessionId = r.sessionId;
       if (typeof localStorage !== 'undefined') {

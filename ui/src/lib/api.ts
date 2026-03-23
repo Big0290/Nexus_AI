@@ -78,12 +78,19 @@ export async function postTask(
   return res.json() as Promise<{ sessionId: string; accepted?: boolean }>;
 }
 
-export async function postTeachUpload(files: FileList | File[]): Promise<{
+export async function postTeachUpload(
+  files: FileList | File[],
+  sessionId?: string | null
+): Promise<{
   ingestId: string;
+  sessionId: string;
   maskedTextChars: number;
   sourceFiles: { name: string; mime: string }[];
 }> {
   const fd = new FormData();
+  if (sessionId?.trim()) {
+    fd.append('sessionId', sessionId.trim());
+  }
   for (const f of Array.from(files)) {
     fd.append('files', f);
   }
@@ -97,6 +104,7 @@ export async function postTeachUpload(files: FileList | File[]): Promise<{
   }
   return res.json() as Promise<{
     ingestId: string;
+    sessionId: string;
     maskedTextChars: number;
     sourceFiles: { name: string; mime: string }[];
   }>;

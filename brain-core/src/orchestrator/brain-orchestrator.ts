@@ -113,6 +113,11 @@ export class BrainOrchestrator {
     return this.auditor.listAudit(limit);
   }
 
+  /** Shared Law 25 auditor (e.g. document ingest on the server uses the same instance as task runs so audit API stays consistent). */
+  getLaw25Auditor(): Law25Auditor {
+    return this.auditor;
+  }
+
   listOutcomeMemory(
     limit: number,
     filter?: { category?: string; tag?: string; q?: string }

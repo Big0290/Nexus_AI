@@ -34,6 +34,13 @@ function sha256(buf: Buffer): string {
   return createHash('sha256').update(buf).digest('hex');
 }
 
+/** Ingest IDs are server-generated UUIDs; reject path-like values before filesystem join. */
+const INGEST_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isSafeIngestId(id: string): boolean {
+  return INGEST_ID_RE.test(id.trim());
+}
+
 function extractXlsx(buf: Buffer): string {
   const wb = XLSX.read(buf, { type: 'buffer' });
   const parts: string[] = [];
@@ -55,15 +62,17 @@ export async function extractTextFromFile(
   name: string,
   mimeRaw: string,
   buf: Buffer,
-  geminiApiKey?: string
+  geminiApiKey: string | undefined,
+  visionOnIngest: boolean
 ): Promise<{ text: string; visionUsed: boolean }> {
   const mime = mimeRaw.split(';')[0].trim().toLowerCase();
   let text = '';
   let visionUsed = false;
+  const visionAllowed = visionOnIngest && Boolean(geminiApiKey?.trim());
 
   if (mime === 'application/pdf' || name.toLowerCase().endsWith('.pdf')) {
     text = await extractPdf(buf).catch(() => '');
-    if (text.trim().length < 40 && geminiApiKey?.trim()) {
+    if (text.trim().length < 40 && visionAllowed) {
       const v = await describeWithGeminiVision(
         geminiApiKey,
         'application/pdf',
@@ -101,13 +110,16 @@ export async function extractTextFromFile(
   }
 
   if (mime.startsWith('image/')) {
-    if (geminiApiKey?.trim()) {
+    if (visionAllowed) {
       const v = await describeWithGeminiVision(geminiApiKey, mime, buf, 'This is an image uploaded for teaching.');
       if (v) {
         return { text: `[Gemini vision description]\n${v}`, visionUsed: true };
       }
     }
-    return { text: `[Binary image ${name} — no vision API key or vision failed; no text extracted.]`, visionUsed };
+    return {
+      text: `[Binary image ${name} — ${visionOnIngest ? 'no vision API key or vision failed' : 'Gemini vision disabled for ingest'}; no text extracted.]`,
+      visionUsed
+    };
   }
 
   return { text: `[Unsupported or empty extract for ${name} (${mime})]`, visionUsed };
@@ -118,12 +130,15 @@ export async function ingestUploadedFiles(opts: {
   auditor: Law25Auditor;
   files: { name: string; mime: string; buffer: Buffer }[];
   geminiApiKey?: string;
+  /** When false, never call Gemini vision (PDF/images stay as placeholders). Default true. */
+  visionOnIngest?: boolean;
 }): Promise<{
   ingestId: string;
   manifest: IngestManifest;
   maskedCombinedText: string;
   sourceFiles: { name: string; mime: string }[];
 }> {
+  const visionOnIngest = opts.visionOnIngest !== false;
   const ingestId = randomUUID();
   const baseDir = join(opts.dataDir, 'uploads', ingestId);
   await mkdir(join(baseDir, 'original'), { recursive: true });
@@ -136,7 +151,13 @@ export async function ingestUploadedFiles(opts: {
     const hash = sha256(f.buffer);
     await writeFile(join(baseDir, 'original', safeName), f.buffer);
 
-    const { text, visionUsed } = await extractTextFromFile(f.name, f.mime, f.buffer, opts.geminiApiKey);
+    const { text, visionUsed } = await extractTextFromFile(
+      f.name,
+      f.mime,
+      f.buffer,
+      opts.geminiApiKey,
+      visionOnIngest
+    );
     const block = `### File: ${f.name} (${f.mime})\n${text}`;
     textBlocks.push(block);
 
@@ -181,6 +202,7 @@ export async function loadDocumentIngest(
   maskedCombinedText: string;
   sourceFiles: { name: string; mime: string }[];
 } | null> {
+  if (!isSafeIngestId(ingestId)) return null;
   const baseDir = join(dataDir, 'uploads', ingestId);
   try {
     const manifestRaw = await readFile(join(baseDir, 'manifest.json'), 'utf8');

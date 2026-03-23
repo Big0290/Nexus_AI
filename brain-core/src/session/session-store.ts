@@ -2,10 +2,12 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ISOTimestamp, SessionTurn } from '../lib/types.js';
 
-interface SessionFile {
+export interface SessionFile {
   id: string;
   updatedAt: ISOTimestamp;
   turns: SessionTurn[];
+  /** Latest document teach ingest bound to this session (server-enforced). */
+  documentIngestId?: string;
 }
 
 /** Turn prior messages into a block for LLM prompts (interpretation / strategy context). */
@@ -66,9 +68,21 @@ export class SessionStore {
     await this.write({
       id: sessionId,
       updatedAt: new Date().toISOString(),
-      turns
+      turns,
+      ...(existing?.documentIngestId != null ? { documentIngestId: existing.documentIngestId } : {})
     });
     return { priorTurns };
+  }
+
+  /** Bind the latest document upload ingest to this session (document_teach must match). */
+  async setDocumentIngest(sessionId: string, ingestId: string): Promise<void> {
+    const existing = await this.load(sessionId);
+    await this.write({
+      id: sessionId,
+      updatedAt: new Date().toISOString(),
+      turns: existing?.turns ?? [],
+      documentIngestId: ingestId
+    });
   }
 
   /** Append assistant reply after a run (e.g. specialist result summary). */
@@ -87,7 +101,8 @@ export class SessionStore {
     await this.write({
       id: sessionId,
       updatedAt: new Date().toISOString(),
-      turns
+      turns,
+      ...(existing.documentIngestId != null ? { documentIngestId: existing.documentIngestId } : {})
     });
   }
 }

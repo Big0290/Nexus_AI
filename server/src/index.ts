@@ -3,13 +3,13 @@ import './load-env.js';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { serve } from '@hono/node-server';
-import type { DocumentTeachRunOptions } from '@nexus/brain-core';
-import { Law25Auditor, SessionStore } from '@nexus/brain-core';
+import { SessionStore } from '@nexus/brain-core';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { streamSSE } from 'hono/streaming';
 import { createBrainRuntime } from './brain-runtime.js';
-import { ingestUploadedFiles, loadDocumentIngest } from './document-ingest.js';
+import { ingestUploadedFiles, isSafeIngestId, loadDocumentIngest } from './document-ingest.js';
+import { scheduleUploadCleanup } from './upload-cleanup.js';
 
 const DATA_DIR = process.env.DATA_DIR ?? './data';
 const PORT = Number(process.env.PORT ?? 8787);
@@ -20,6 +20,24 @@ const API_KEY = process.env.NEXUS_API_KEY?.trim();
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY?.trim();
 const UPLOAD_MAX_MB = Number(process.env.UPLOAD_MAX_MB ?? '25');
 const UPLOAD_MAX_BYTES = (Number.isFinite(UPLOAD_MAX_MB) && UPLOAD_MAX_MB > 0 ? UPLOAD_MAX_MB : 25) * 1024 * 1024;
+const UPLOAD_MAX_PER_FILE_MB = process.env.UPLOAD_MAX_PER_FILE_MB
+  ? Number(process.env.UPLOAD_MAX_PER_FILE_MB)
+  : UPLOAD_MAX_MB;
+const UPLOAD_MAX_PER_FILE_BYTES =
+  (Number.isFinite(UPLOAD_MAX_PER_FILE_MB) && UPLOAD_MAX_PER_FILE_MB > 0 ? UPLOAD_MAX_PER_FILE_MB : UPLOAD_MAX_MB) *
+  1024 *
+  1024;
+const GEMINI_VISION_ON_INGEST = process.env.GEMINI_VISION_ON_INGEST !== '0' && process.env.GEMINI_VISION_ON_INGEST !== 'false';
+const UPLOAD_TTL_DAYS = process.env.UPLOAD_TTL_DAYS ? Number(process.env.UPLOAD_TTL_DAYS) : 30;
+const UPLOAD_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+const ingestStats = {
+  uploadsOk: 0,
+  uploadFailures: 0,
+  visionFiles: 0
+};
+
+let uploadBusy = false;
 
 const SQLITE_PATH = process.env.SQLITE_PATH?.trim();
 const CLARIFY_MIN = process.env.CLARIFY_MIN_CONFIDENCE
@@ -41,10 +59,13 @@ const brain = await createBrainRuntime({
 
 const sessionStore = new SessionStore(join(DATA_DIR, 'sessions'));
 
-const uploadAuditor = new Law25Auditor({ persistPath: join(DATA_DIR, 'compliance-audit.jsonl') });
-await uploadAuditor.loadFromDisk();
-
 let busy = false;
+
+scheduleUploadCleanup(DATA_DIR, UPLOAD_TTL_DAYS, UPLOAD_CLEANUP_INTERVAL_MS, (removed) => {
+  if (removed > 0) {
+    console.log(JSON.stringify({ event: 'upload_cleanup', removed, ttlDays: UPLOAD_TTL_DAYS }));
+  }
+});
 
 const app = new Hono();
 
@@ -81,11 +102,13 @@ app.get('/api/health', (c) => {
     ok: true,
     busy: busy || st.processing,
     serverQueueBusy: busy,
+    uploadBusy,
     orchestratorProcessing: st.processing,
     model: st.modelMode,
     authEnabled: Boolean(API_KEY),
     dataDir: DATA_DIR,
-    orchestratorId: st.orchestratorId
+    orchestratorId: st.orchestratorId,
+    ingestStats: { ...ingestStats }
   });
 });
 
@@ -121,17 +144,37 @@ app.get('/api/session/:id', async (c) => {
 });
 
 app.post('/api/teach/upload', async (c) => {
+  if (uploadBusy) {
+    return c.json({ error: 'Upload in progress' }, 429);
+  }
   const body = await c.req.parseBody({ all: true });
   const raw = body.files;
   if (!raw) {
     return c.json({ error: 'files field is required (multipart)' }, 400);
   }
+
+  let sessionId =
+    typeof body.sessionId === 'string' && body.sessionId.trim() ? body.sessionId.trim() : '';
+  if (!sessionId) {
+    sessionId = randomUUID();
+  } else if (!isSafeIngestId(sessionId)) {
+    return c.json({ error: 'Invalid sessionId (expected UUID)' }, 400);
+  }
+
   const fileList = Array.isArray(raw) ? raw : [raw];
   const buffers: { name: string; mime: string; buffer: Buffer }[] = [];
   let total = 0;
   for (const entry of fileList) {
     if (!(entry instanceof File)) continue;
     const buf = Buffer.from(await entry.arrayBuffer());
+    if (buf.length > UPLOAD_MAX_PER_FILE_BYTES) {
+      return c.json(
+        {
+          error: `File exceeds per-file limit (${UPLOAD_MAX_PER_FILE_MB} MB)`
+        },
+        413
+      );
+    }
     total += buf.length;
     if (total > UPLOAD_MAX_BYTES) {
       return c.json({ error: `Total upload exceeds ${UPLOAD_MAX_MB} MB` }, 413);
@@ -146,22 +189,53 @@ app.post('/api/teach/upload', async (c) => {
     return c.json({ error: 'No valid files in upload' }, 400);
   }
 
+  const t0 = Date.now();
+  uploadBusy = true;
   try {
     const result = await ingestUploadedFiles({
       dataDir: DATA_DIR,
-      auditor: uploadAuditor,
+      auditor: brain.getLaw25Auditor(),
       files: buffers,
-      geminiApiKey: GEMINI_API_KEY
+      geminiApiKey: GEMINI_API_KEY,
+      visionOnIngest: GEMINI_VISION_ON_INGEST
     });
+    await sessionStore.setDocumentIngest(sessionId, result.ingestId);
+    const visionUsedCount = result.manifest.files.filter((f) => f.visionUsed).length;
+    ingestStats.uploadsOk += 1;
+    ingestStats.visionFiles += visionUsedCount;
+    console.log(
+      JSON.stringify({
+        event: 'ingest_complete',
+        ingestId: result.ingestId,
+        sessionId,
+        fileCount: buffers.length,
+        totalBytes: total,
+        visionUsedCount,
+        durationMs: Date.now() - t0
+      })
+    );
     return c.json({
       ingestId: result.ingestId,
+      sessionId,
       manifest: result.manifest,
       maskedTextChars: result.manifest.maskedTextChars,
       sourceFiles: result.sourceFiles
     });
   } catch (e) {
+    ingestStats.uploadFailures += 1;
+    const message = e instanceof Error ? e.message : String(e);
+    console.log(
+      JSON.stringify({
+        event: 'ingest_error',
+        message,
+        sessionId,
+        durationMs: Date.now() - t0
+      })
+    );
     console.error('ingest failed', e);
-    return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+    return c.json({ error: message }, 500);
+  } finally {
+    uploadBusy = false;
   }
 });
 
@@ -178,19 +252,35 @@ app.post('/api/tasks', async (c) => {
   }>();
   const taskType = body.taskType?.trim() || 'general';
   let description = body.description?.trim() ?? '';
-  const sessionId = body.sessionId?.trim() || randomUUID();
 
-  let documentTeach: DocumentTeachRunOptions | undefined;
   if (taskType === 'document_teach') {
+    const sessionIdRaw = body.sessionId?.trim();
+    if (!sessionIdRaw) {
+      return c.json(
+        { error: 'sessionId is required for document_teach (use sessionId returned by POST /api/teach/upload)' },
+        400
+      );
+    }
+    if (!isSafeIngestId(sessionIdRaw)) {
+      return c.json({ error: 'Invalid sessionId' }, 400);
+    }
+    const sessionId = sessionIdRaw;
     const ingestId = body.ingestId?.trim();
     if (!ingestId) {
       return c.json({ error: 'ingestId is required for document_teach (use POST /api/teach/upload first)' }, 400);
+    }
+    const bound = await sessionStore.load(sessionId);
+    if (!bound?.documentIngestId || bound.documentIngestId !== ingestId) {
+      return c.json(
+        { error: 'ingestId does not match this session; upload documents again for this session' },
+        403
+      );
     }
     const loaded = await loadDocumentIngest(DATA_DIR, ingestId);
     if (!loaded) {
       return c.json({ error: 'Unknown or empty ingest; upload again' }, 400);
     }
-    documentTeach = {
+    const documentTeach = {
       ingestId,
       maskedDocumentText: loaded.maskedCombinedText,
       sourceFiles: loaded.sourceFiles,
@@ -199,7 +289,34 @@ app.post('/api/tasks', async (c) => {
     if (!description) {
       description = `Teach from uploaded documents: ${loaded.sourceFiles.map((f) => f.name).join(', ')}`;
     }
-  } else if (!description) {
+    const { priorTurns } = await sessionStore.appendUser(sessionId, description);
+    busy = true;
+    void brain
+      .runTask(description, taskType, {
+        sessionId,
+        priorSessionTurns: priorTurns,
+        documentTeach
+      })
+      .then(async (r) => {
+        try {
+          if (r.status === 'completed' && r.finalResult) {
+            await sessionStore.appendAssistant(sessionId, r.finalResult.slice(0, 6000));
+          } else if (r.status === 'error' && r.error) {
+            await sessionStore.appendAssistant(sessionId, `[Brain error] ${r.error}`);
+          }
+        } catch (e) {
+          console.error('session appendAssistant failed', e);
+        }
+      })
+      .catch((e) => console.error('runTask failed', e))
+      .finally(() => {
+        busy = false;
+      });
+    return c.json({ accepted: true, sessionId });
+  }
+
+  const sessionId = body.sessionId?.trim() || randomUUID();
+  if (!description) {
     return c.json({ error: 'description is required' }, 400);
   }
 
@@ -208,8 +325,7 @@ app.post('/api/tasks', async (c) => {
   void brain
     .runTask(description, taskType, {
       sessionId,
-      priorSessionTurns: priorTurns,
-      ...(documentTeach ? { documentTeach } : {})
+      priorSessionTurns: priorTurns
     })
     .then(async (r) => {
       try {
