@@ -1,0 +1,315 @@
+import './load-env.js';
+
+import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
+import { serve } from '@hono/node-server';
+import type { DocumentTeachRunOptions } from '@nexus/brain-core';
+import { Law25Auditor, SessionStore } from '@nexus/brain-core';
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { streamSSE } from 'hono/streaming';
+import { createBrainRuntime } from './brain-runtime.js';
+import { ingestUploadedFiles, loadDocumentIngest } from './document-ingest.js';
+
+const DATA_DIR = process.env.DATA_DIR ?? './data';
+const PORT = Number(process.env.PORT ?? 8787);
+const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
+const GEMINI_EMBEDDING_MODEL = process.env.GEMINI_EMBEDDING_MODEL ?? 'text-embedding-004';
+const USE_EMBEDDINGS = process.env.GEMINI_EMBEDDINGS === '1';
+const API_KEY = process.env.NEXUS_API_KEY?.trim();
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY?.trim();
+const UPLOAD_MAX_MB = Number(process.env.UPLOAD_MAX_MB ?? '25');
+const UPLOAD_MAX_BYTES = (Number.isFinite(UPLOAD_MAX_MB) && UPLOAD_MAX_MB > 0 ? UPLOAD_MAX_MB : 25) * 1024 * 1024;
+
+const SQLITE_PATH = process.env.SQLITE_PATH?.trim();
+const CLARIFY_MIN = process.env.CLARIFY_MIN_CONFIDENCE
+  ? Number(process.env.CLARIFY_MIN_CONFIDENCE)
+  : undefined;
+const CLARIFY_ALWAYS = process.env.CLARIFY_ALWAYS_QUESTIONS === '1';
+
+const brain = await createBrainRuntime({
+  dataDir: DATA_DIR,
+  orchestratorId: process.env.ORCHESTRATOR_ID ?? 'brain-1',
+  geminiApiKey: process.env.GEMINI_API_KEY,
+  geminiModel: GEMINI_MODEL,
+  geminiEmbeddingModel: GEMINI_EMBEDDING_MODEL,
+  useEmbeddings: USE_EMBEDDINGS,
+  sqlitePath: SQLITE_PATH || undefined,
+  clarifyMinConfidence: Number.isFinite(CLARIFY_MIN) ? CLARIFY_MIN : undefined,
+  clarifyAlwaysQuestions: CLARIFY_ALWAYS
+});
+
+const sessionStore = new SessionStore(join(DATA_DIR, 'sessions'));
+
+const uploadAuditor = new Law25Auditor({ persistPath: join(DATA_DIR, 'compliance-audit.jsonl') });
+await uploadAuditor.loadFromDisk();
+
+let busy = false;
+
+const app = new Hono();
+
+function verifyApiKey(c: { req: { header: (n: string) => string | undefined; query: (n: string) => string | undefined } }): boolean {
+  if (!API_KEY) return true;
+  const auth = c.req.header('Authorization');
+  const keyHeader = c.req.header('X-API-Key');
+  const q = c.req.query('api_key');
+  return auth === `Bearer ${API_KEY}` || keyHeader === API_KEY || q === API_KEY;
+}
+
+app.use(
+  '*',
+  cors({
+    origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
+    allowMethods: ['GET', 'POST', 'OPTIONS'],
+    allowHeaders: ['Content-Type', 'Authorization', 'X-API-Key']
+  })
+);
+
+app.use('*', async (c, next) => {
+  if (c.req.method === 'OPTIONS') return next();
+  if (!API_KEY) return next();
+  if (c.req.path === '/api/health') return next();
+  if (!verifyApiKey(c)) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+  return next();
+});
+
+app.get('/api/health', (c) => {
+  const st = brain.getState();
+  return c.json({
+    ok: true,
+    busy: busy || st.processing,
+    serverQueueBusy: busy,
+    orchestratorProcessing: st.processing,
+    model: st.modelMode,
+    authEnabled: Boolean(API_KEY),
+    dataDir: DATA_DIR,
+    orchestratorId: st.orchestratorId
+  });
+});
+
+app.get('/api/state', (c) => c.json(brain.getState()));
+
+app.get('/api/audit', (c) => {
+  const limit = Number(c.req.query('limit') ?? '100');
+  return c.json({ entries: brain.listComplianceAudit(limit) });
+});
+
+app.get('/api/memory', (c) => {
+  const limit = Number(c.req.query('limit') ?? '50');
+  const category = c.req.query('category')?.trim();
+  const tag = c.req.query('tag')?.trim();
+  const q = c.req.query('q')?.trim();
+  const filter =
+    category || tag || q ? { category: category || undefined, tag: tag || undefined, q: q || undefined } : undefined;
+  return c.json({ outcomes: brain.listOutcomeMemory(limit, filter) });
+});
+
+app.get('/api/memory/meta', (c) => {
+  return c.json({
+    categories: brain.listMemoryCategories(),
+    tags: brain.listMemoryTags()
+  });
+});
+
+app.get('/api/session/:id', async (c) => {
+  const id = c.req.param('id');
+  const session = await sessionStore.load(id);
+  if (!session) return c.json({ error: 'Session not found' }, 404);
+  return c.json({ session });
+});
+
+app.post('/api/teach/upload', async (c) => {
+  const body = await c.req.parseBody({ all: true });
+  const raw = body.files;
+  if (!raw) {
+    return c.json({ error: 'files field is required (multipart)' }, 400);
+  }
+  const fileList = Array.isArray(raw) ? raw : [raw];
+  const buffers: { name: string; mime: string; buffer: Buffer }[] = [];
+  let total = 0;
+  for (const entry of fileList) {
+    if (!(entry instanceof File)) continue;
+    const buf = Buffer.from(await entry.arrayBuffer());
+    total += buf.length;
+    if (total > UPLOAD_MAX_BYTES) {
+      return c.json({ error: `Total upload exceeds ${UPLOAD_MAX_MB} MB` }, 413);
+    }
+    buffers.push({
+      name: entry.name || 'unnamed',
+      mime: entry.type || 'application/octet-stream',
+      buffer: buf
+    });
+  }
+  if (!buffers.length) {
+    return c.json({ error: 'No valid files in upload' }, 400);
+  }
+
+  try {
+    const result = await ingestUploadedFiles({
+      dataDir: DATA_DIR,
+      auditor: uploadAuditor,
+      files: buffers,
+      geminiApiKey: GEMINI_API_KEY
+    });
+    return c.json({
+      ingestId: result.ingestId,
+      manifest: result.manifest,
+      maskedTextChars: result.manifest.maskedTextChars,
+      sourceFiles: result.sourceFiles
+    });
+  } catch (e) {
+    console.error('ingest failed', e);
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 500);
+  }
+});
+
+app.post('/api/tasks', async (c) => {
+  if (busy) {
+    return c.json({ error: 'Orchestrator is busy with another task' }, 429);
+  }
+  const body = await c.req.json<{
+    description?: string;
+    taskType?: string;
+    sessionId?: string;
+    ingestId?: string;
+    focusNote?: string;
+  }>();
+  const taskType = body.taskType?.trim() || 'general';
+  let description = body.description?.trim() ?? '';
+  const sessionId = body.sessionId?.trim() || randomUUID();
+
+  let documentTeach: DocumentTeachRunOptions | undefined;
+  if (taskType === 'document_teach') {
+    const ingestId = body.ingestId?.trim();
+    if (!ingestId) {
+      return c.json({ error: 'ingestId is required for document_teach (use POST /api/teach/upload first)' }, 400);
+    }
+    const loaded = await loadDocumentIngest(DATA_DIR, ingestId);
+    if (!loaded) {
+      return c.json({ error: 'Unknown or empty ingest; upload again' }, 400);
+    }
+    documentTeach = {
+      ingestId,
+      maskedDocumentText: loaded.maskedCombinedText,
+      sourceFiles: loaded.sourceFiles,
+      focusNote: body.focusNote?.trim()
+    };
+    if (!description) {
+      description = `Teach from uploaded documents: ${loaded.sourceFiles.map((f) => f.name).join(', ')}`;
+    }
+  } else if (!description) {
+    return c.json({ error: 'description is required' }, 400);
+  }
+
+  const { priorTurns } = await sessionStore.appendUser(sessionId, description);
+  busy = true;
+  void brain
+    .runTask(description, taskType, {
+      sessionId,
+      priorSessionTurns: priorTurns,
+      ...(documentTeach ? { documentTeach } : {})
+    })
+    .then(async (r) => {
+      try {
+        if (r.status === 'completed' && r.finalResult) {
+          await sessionStore.appendAssistant(sessionId, r.finalResult.slice(0, 6000));
+        } else if (r.status === 'error' && r.error) {
+          await sessionStore.appendAssistant(sessionId, `[Brain error] ${r.error}`);
+        }
+      } catch (e) {
+        console.error('session appendAssistant failed', e);
+      }
+    })
+    .catch((e) => console.error('runTask failed', e))
+    .finally(() => {
+      busy = false;
+    });
+  return c.json({ accepted: true, sessionId });
+});
+
+app.post('/api/interventions/:id/approve', async (c) => {
+  const id = c.req.param('id');
+  const body = (await c.req.json<{ humanInstruction?: string }>().catch(() => ({}))) as {
+    humanInstruction?: string;
+  };
+  try {
+    brain.submitHumanAction(id, { type: 'approve', humanInstruction: body.humanInstruction });
+    return c.json({ ok: true });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+  }
+});
+
+app.post('/api/interventions/:id/inject', async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json<{ humanInstruction?: string }>();
+  const hi = body.humanInstruction?.trim();
+  if (!hi) return c.json({ error: 'humanInstruction is required' }, 400);
+  try {
+    brain.submitHumanAction(id, { type: 'inject_context', humanInstruction: hi });
+    return c.json({ ok: true });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+  }
+});
+
+app.post('/api/interventions/:id/clarify', async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json<{ answers?: string }>();
+  const answers = body.answers?.trim();
+  if (!answers) return c.json({ error: 'answers is required' }, 400);
+  try {
+    brain.submitHumanAction(id, { type: 'clarification_reply', answers });
+    return c.json({ ok: true });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+  }
+});
+
+app.post('/api/interventions/:id/override', async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json<{ outcome?: 'success' | 'failure'; failureReason?: string }>();
+  if (!body.outcome) return c.json({ error: 'outcome is required' }, 400);
+  try {
+    brain.submitHumanAction(id, {
+      type: 'override_outcome',
+      outcome: body.outcome,
+      failureReason: body.failureReason
+    });
+    return c.json({ ok: true });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+  }
+});
+
+app.post('/api/memory/:id/teach', async (c) => {
+  const id = c.req.param('id');
+  const body = await c.req.json<{ outcome?: 'success' | 'failure'; failureReason?: string }>();
+  if (!body.outcome) return c.json({ error: 'outcome is required' }, 400);
+  const updated = await brain.teachOutcome(id, body.outcome, body.failureReason);
+  if (!updated) return c.json({ error: 'Outcome not found' }, 404);
+  return c.json({ ok: true, updated });
+});
+
+app.get('/api/events', async (c) => {
+  return streamSSE(c, async (stream) => {
+    await stream.writeSSE({
+      data: JSON.stringify({ type: 'state', state: brain.getState() })
+    });
+
+    const unsub = brain.subscribe(async (ev) => {
+      await stream.writeSSE({ data: JSON.stringify(ev) });
+    });
+
+    await new Promise<void>((resolve) => {
+      c.req.raw.signal.addEventListener('abort', () => resolve(), { once: true });
+    });
+    unsub();
+  });
+});
+
+serve({ fetch: app.fetch, port: PORT }, (info) => {
+  console.log(`Brain API listening on http://localhost:${info.port}`);
+});
