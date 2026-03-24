@@ -12,6 +12,7 @@ export type {
   OrchestratorState,
   OutcomeMemory,
   TaskContext,
+  TaskRunResult,
   ThoughtPhase,
   ThoughtStreamEntry
 } from '@nexus/brain-core';

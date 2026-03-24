@@ -26,6 +26,18 @@ import { mergeSimilarOutcomes } from '../util/similar-outcomes.js';
 
 const DEFAULT_CONFIDENCE = 0.7;
 
+function shortPreview(s: string | undefined | null, max: number): string {
+  if (!s) return '';
+  const t = s.trim();
+  if (t.length <= max) return t;
+  return `${t.slice(0, max)}…`;
+}
+
+function intakeCategoriesPreview(ir: InterpretationResult, max = 96): string {
+  const line = ir.categories.join(', ');
+  return shortPreview(line, max);
+}
+
 export type BrainEvent =
   | { type: 'thought'; entry: ThoughtStreamEntry }
   | { type: 'state'; state: OrchestratorState }
@@ -136,6 +148,26 @@ export class BrainOrchestrator {
     return this.memory.listTags();
   }
 
+  /** Update stored outcome fields (human edit of acquired knowledge). */
+  async updateOutcomeMemory(
+    outcomeId: string,
+    patch: Partial<
+      Pick<
+        OutcomeMemory,
+        | 'successScore'
+        | 'failureReason'
+        | 'result'
+        | 'primaryCategory'
+        | 'categories'
+        | 'canonicalQuery'
+        | 'interpretedGoal'
+        | 'tags'
+      >
+    >
+  ): Promise<OutcomeMemory | undefined> {
+    return this.memory.updateOutcome(outcomeId, patch);
+  }
+
   subscribe(fn: (e: BrainEvent) => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
@@ -153,13 +185,19 @@ export class BrainOrchestrator {
     this.emit({ type: 'state', state: structuredClone(this.state) });
   }
 
-  private pushThought(phase: ThoughtPhase, message: string, metadata?: Record<string, unknown>): void {
+  private pushThought(
+    phase: ThoughtPhase,
+    message: string,
+    metadata?: Record<string, unknown>,
+    detail?: string
+  ): void {
     const entry: ThoughtStreamEntry = {
       id: newId('thought'),
       timestamp: new Date().toISOString(),
       phase,
       message,
-      metadata
+      metadata,
+      ...(detail ? { detail } : {})
     };
     this.state.thoughtStream.unshift(entry);
     if (this.state.thoughtStream.length > 400) this.state.thoughtStream.length = 400;
@@ -259,9 +297,21 @@ export class BrainOrchestrator {
       }
       this.pushThought('recall', `Searching outcome memory for similar tasks: ${taskType}`);
       let similar = await this.memory.searchSimilar(recallQuery, 8);
-      this.pushThought('recall', `Recall: ${similar.length} similar outcomes (top score ${similar[0]?.score != null ? similar[0].score.toFixed(3) : 'n/a'})`, {
-        similar: similar.slice(0, 5).map((s) => ({ id: s.memory.id, score: s.score }))
-      });
+      this.pushThought(
+        'recall',
+        `Recall: ${similar.length} similar outcomes (top score ${similar[0]?.score != null ? similar[0].score.toFixed(3) : 'n/a'})`,
+        {
+          similar: similar.slice(0, 5).map((s) => ({ id: s.memory.id, score: s.score })),
+          topMatches: similar.slice(0, 3).map((s) => ({
+            id: s.memory.id,
+            score: s.score,
+            label: shortPreview(s.memory.primaryCategory || s.memory.canonicalQuery || s.memory.taskType, 56)
+          }))
+        },
+        similar[0]
+          ? `Top match: ${shortPreview(similar[0].memory.primaryCategory || similar[0].memory.canonicalQuery, 72)}`
+          : undefined
+      );
 
       // 2) Intake: LLM interpret — or synthetic for document_teach
       let interpreted: InterpretationResult;
@@ -273,13 +323,16 @@ export class BrainOrchestrator {
         interpretAudit = this.auditor.auditPayload('brain_internal', JSON.stringify(interpreted));
         this.pushThought(
           'ingest',
-          `Document teach (synthetic intake): ${interpreted.primaryCategory} · ingest ${opts.documentTeach.ingestId}`,
+          `Document teach (synthetic intake): ${intakeCategoriesPreview(interpreted)} · ingest ${opts.documentTeach.ingestId}`,
           {
+            categories: interpreted.categories,
             category: interpreted.primaryCategory,
+            intakeAcknowledgment: interpreted.intakeAcknowledgment,
             tags: interpreted.tags,
             ingestId: opts.documentTeach.ingestId,
             auditId: interpretAudit.entry.id
-          }
+          },
+          interpreted.intakeAcknowledgment ? shortPreview(interpreted.intakeAcknowledgment, 140) : undefined
         );
       } else {
         interpreted = await this.interpretation.interpret(
@@ -295,14 +348,17 @@ export class BrainOrchestrator {
         interpretAudit = this.auditor.auditPayload('brain_internal', JSON.stringify(interpreted));
         this.pushThought(
           'ingest',
-          `Intake: ${interpreted.primaryCategory} — ${interpreted.interpretedGoal.slice(0, 120)}${interpreted.interpretedGoal.length > 120 ? '…' : ''}`,
+          `Intake: ${intakeCategoriesPreview(interpreted, 72)} — ${interpreted.interpretedGoal.slice(0, 120)}${interpreted.interpretedGoal.length > 120 ? '…' : ''}`,
           {
+            categories: interpreted.categories,
             category: interpreted.primaryCategory,
+            intakeAcknowledgment: interpreted.intakeAcknowledgment,
             tags: interpreted.tags,
             confidence: interpreted.confidence,
             memoryLinks: interpreted.memoryLinks,
             auditId: interpretAudit.entry.id
-          }
+          },
+          interpreted.intakeAcknowledgment ? shortPreview(interpreted.intakeAcknowledgment, 140) : undefined
         );
       }
 
@@ -313,13 +369,16 @@ export class BrainOrchestrator {
           requestId: newId('int'),
           questions: interpreted.clarificationsNeeded,
           rationale: `Intake confidence ${interpreted.confidence.toFixed(2)} · clarify before execution`,
+          assumptionOptions: interpreted.assumptions.slice(0, 12),
+          constraintOptions: interpreted.constraints.slice(0, 12),
           brainContext: [
             `The Brain needs a bit more detail before running tools.`,
             `Interpreted goal: ${mask(interpreted.interpretedGoal)}`,
-            `Category: ${interpreted.primaryCategory}`,
+            `Categories: ${interpreted.categories.join(' | ')}`,
             `Assumptions noted: ${interpreted.assumptions.slice(0, 5).join(' · ') || '(none)'}`
           ].join('\n'),
-          proposedNextStep: 'Answer the questions below (or approve to proceed with best effort).'
+          proposedNextStep:
+            'Confirm which AI assumptions still hold, then answer the questions (or add a short note) so the next intake can learn.'
         };
         this.state.status = 'awaiting_human';
         this.state.agentState.status = 'awaiting_human';
@@ -338,31 +397,50 @@ export class BrainOrchestrator {
         this.state.agentState.status = 'reflecting';
         this.emitState();
 
-        if (clarifyAction.type === 'clarification_reply' && clarifyAction.answers.trim()) {
-          workingDescription = `${workingDescription}\n\n[User clarification]: ${clarifyAction.answers.trim()}`;
-          similar = await this.memory.searchSimilar(workingDescription, 8);
-          if (isDocTeach && opts?.documentTeach) {
-            interpreted = syntheticInterpretationForDocumentTeach(description, opts.documentTeach);
-            this.state.lastInterpretation = structuredClone(interpreted);
-            interpretAudit = this.auditor.auditPayload('brain_internal', JSON.stringify(interpreted));
-          } else {
-            interpreted = await this.interpretation.interpret(
-              {
-                rawPrompt: workingDescription,
-                taskType,
-                candidates: similar,
-                sessionTranscript: sessionTranscript || undefined
-              },
-              { mask }
-            );
-            this.state.lastInterpretation = structuredClone(interpreted);
-            interpretAudit = this.auditor.auditPayload('brain_internal', JSON.stringify(interpreted));
+        if (clarifyAction.type === 'clarification_reply') {
+          const ans = clarifyAction.answers.trim();
+          const confA = clarifyAction.confirmedAssumptions?.filter((s) => typeof s === 'string' && s.trim()) ?? [];
+          const confC = clarifyAction.confirmedConstraints?.filter((s) => typeof s === 'string' && s.trim()) ?? [];
+          if (ans || confA.length || confC.length) {
+            const parts: string[] = [];
+            if (confA.length) {
+              parts.push(
+                `User confirmed these intake assumptions (treat as ground truth for re-intake): ${confA.join(' | ')}`
+              );
+            }
+            if (confC.length) {
+              parts.push(`User confirmed these constraints: ${confC.join(' | ')}`);
+            }
+            if (ans) {
+              parts.push(`Answers / free-form detail: ${ans}`);
+            }
+            workingDescription = `${workingDescription}\n\n[User clarification / learning signal]:\n${parts.join('\n')}`;
+            similar = await this.memory.searchSimilar(workingDescription, 8);
+            if (isDocTeach && opts?.documentTeach) {
+              interpreted = syntheticInterpretationForDocumentTeach(description, opts.documentTeach);
+              this.state.lastInterpretation = structuredClone(interpreted);
+              interpretAudit = this.auditor.auditPayload('brain_internal', JSON.stringify(interpreted));
+            } else {
+              interpreted = await this.interpretation.interpret(
+                {
+                  rawPrompt: workingDescription,
+                  taskType,
+                  candidates: similar,
+                  sessionTranscript: sessionTranscript || undefined
+                },
+                { mask }
+              );
+              this.state.lastInterpretation = structuredClone(interpreted);
+              interpretAudit = this.auditor.auditPayload('brain_internal', JSON.stringify(interpreted));
+            }
+            this.pushThought('ingest', `Intake (after clarification): ${intakeCategoriesPreview(interpreted, 72)}`, {
+              categories: interpreted.categories,
+              category: interpreted.primaryCategory,
+              intakeAcknowledgment: interpreted.intakeAcknowledgment,
+              confidence: interpreted.confidence,
+              auditId: interpretAudit.entry.id
+            });
           }
-          this.pushThought('ingest', `Intake (after clarification): ${interpreted.primaryCategory}`, {
-            category: interpreted.primaryCategory,
-            confidence: interpreted.confidence,
-            auditId: interpretAudit.entry.id
-          });
         }
       }
 
@@ -371,9 +449,15 @@ export class BrainOrchestrator {
       if (cq && cq !== workingDescription.trim()) {
         const extra = await this.memory.searchSimilar(cq, 8);
         similarForPlan = mergeSimilarOutcomes(similar, extra);
-        this.pushThought('recall', `Merged recall on canonical query (${similarForPlan.length} outcomes)`, {
-          canonicalQuery: cq.slice(0, 160)
-        });
+        this.pushThought(
+          'recall',
+          `Merged recall on canonical query (${similarForPlan.length} outcomes)`,
+          {
+            canonicalQuery: cq.slice(0, 160),
+            mergedSampleIds: similarForPlan.slice(0, 3).map((s) => s.memory.id)
+          },
+          shortPreview(cq, 90)
+        );
       }
 
       const taskLine = cq || workingDescription;
@@ -381,6 +465,8 @@ export class BrainOrchestrator {
         ...task.metadata,
         interpretationGoal: interpreted.interpretedGoal,
         primaryCategory: interpreted.primaryCategory,
+        interpretationCategories: interpreted.categories,
+        intakeAcknowledgment: interpreted.intakeAcknowledgment,
         intakeConfidence: interpreted.confidence
       };
 
@@ -397,9 +483,16 @@ export class BrainOrchestrator {
 
       const planText = JSON.stringify(plan);
       const planAudit = this.auditor.auditPayload('plan', planText);
-      this.pushThought('strategy', `Plan ready (confidence ${plan.confidence.toFixed(2)}): ${plan.summary}`, {
-        maskedPlanExcerpt: planAudit.masked.slice(0, 200)
-      });
+      this.pushThought(
+        'strategy',
+        `Plan ready (confidence ${plan.confidence.toFixed(2)}): ${plan.summary}`,
+        {
+          maskedPlanExcerpt: planAudit.masked.slice(0, 200),
+          lessonsCount: plan.lessonsApplied.length,
+          lessonPreview: plan.lessonsApplied[0] ? shortPreview(plan.lessonsApplied[0], 120) : undefined
+        },
+        plan.lessonsApplied[0] ? `Lesson: ${shortPreview(plan.lessonsApplied[0], 100)}` : undefined
+      );
 
       // 3) Compliance on plan (audited above)
       this.pushThought('compliance', 'Law 25 audit on plan complete', {
@@ -410,7 +503,6 @@ export class BrainOrchestrator {
       // 4) Specialist spawning (prompt)
       this.state.status = 'executing';
       this.state.agentState.status = 'executing';
-      this.pushThought('spawn', 'Building specialist system prompt and tool surface');
       const systemPrompt = isDocTeach
         ? await this.reflection.buildDocumentLearnerSystemPrompt(
             taskLine,
@@ -426,6 +518,9 @@ export class BrainOrchestrator {
             interpreted,
             { mask }
           );
+      this.pushThought('spawn', 'Building specialist system prompt and tool surface', {
+        systemPromptChars: systemPrompt.length
+      });
       const tools = ['finish', 'clarify', 'lookup'];
 
       const docPayloadMax = 120_000;
@@ -445,6 +540,8 @@ export class BrainOrchestrator {
           interpretation: {
             goal: interpreted.interpretedGoal,
             category: interpreted.primaryCategory,
+            categories: interpreted.categories,
+            intakeAcknowledgment: interpreted.intakeAcknowledgment,
             tags: interpreted.tags,
             memoryLinks: interpreted.memoryLinks
           },
@@ -459,6 +556,8 @@ export class BrainOrchestrator {
           interpretation: {
             goal: interpreted.interpretedGoal,
             category: interpreted.primaryCategory,
+            categories: interpreted.categories,
+            intakeAcknowledgment: interpreted.intakeAcknowledgment,
             tags: interpreted.tags,
             memoryLinks: interpreted.memoryLinks
           },
@@ -470,7 +569,15 @@ export class BrainOrchestrator {
       userPayload = inputAudit.masked;
 
       // 5) Specialist execution
-      this.pushThought('spawn', 'Executing specialist at star edge');
+      this.pushThought(
+        'spawn',
+        'Executing specialist at star edge',
+        {
+          maskedSpecialistInputChars: userPayload.length,
+          specialistInputAuditId: inputAudit.entry.id
+        },
+        `Masked payload: ${userPayload.length.toLocaleString()} chars`
+      );
       let specResult = await this.specialist.execute({
         systemPrompt,
         userPayload,
@@ -482,7 +589,6 @@ export class BrainOrchestrator {
 
       // 6) Reflection
       this.state.agentState.status = 'reflecting';
-      this.pushThought('reflection', 'Reflecting on specialist output');
       let reflection = await this.reflection.reflectOnSpecialistResult(
         {
           taskDescription: taskLine,
@@ -492,6 +598,18 @@ export class BrainOrchestrator {
           interpretation: interpreted
         },
         { mask }
+      );
+      this.pushThought(
+        'reflection',
+        `Reflection (confidence ${reflection.confidence.toFixed(2)}): ${shortPreview(reflection.summary, 220)}`,
+        {
+          confidence: reflection.confidence,
+          ok: reflection.ok,
+          escalateToHuman: reflection.escalateToHuman,
+          specialistOutputAuditId: outputAudit.entry.id,
+          maskedOutputChars: maskedOutput.length
+        },
+        reflection.ok ? 'Outcome accepted by reflection gate' : 'Reflection flagged issues or low confidence'
       );
 
       const needsHitl =
@@ -506,7 +624,7 @@ export class BrainOrchestrator {
           brainContext: [
             `Task (interpreted): ${mask(taskLine)}`,
             `Raw message: ${mask(workingDescription)}`,
-            `Intake confidence: ${interpreted.confidence.toFixed(2)} · ${interpreted.primaryCategory}`,
+            `Intake confidence: ${interpreted.confidence.toFixed(2)} · ${interpreted.categories.join(' | ')}`,
             `Reflection: ${reflection.summary}`,
             `Confidence: ${reflection.confidence.toFixed(2)} (threshold ${this.confidenceThreshold})`
           ].join('\n'),
@@ -535,6 +653,7 @@ export class BrainOrchestrator {
             taskId,
             sessionId: opts?.sessionId,
             primaryCategory: interpreted.primaryCategory,
+            categories: interpreted.categories,
             canonicalQuery: interpreted.canonicalQuery,
             interpretedGoal: interpreted.interpretedGoal,
             tags: interpreted.tags,
@@ -590,7 +709,10 @@ export class BrainOrchestrator {
           }
           const secondInputAudit = this.auditor.auditPayload('specialist_input', userPayload);
           userPayload = secondInputAudit.masked;
-          this.pushThought('spawn', 'Retrying specialist with human-injected context');
+          this.pushThought('spawn', 'Retrying specialist with human-injected context', {
+            maskedSpecialistInputChars: userPayload.length,
+            specialistInputAuditId: secondInputAudit.entry.id
+          });
           specResult = await this.specialist.execute({ systemPrompt, userPayload, tools });
           outputAudit = this.auditor.auditPayload('specialist_output', specResult.raw);
           maskedOutput = outputAudit.masked;
@@ -604,6 +726,16 @@ export class BrainOrchestrator {
             },
             { mask }
           );
+          this.pushThought(
+            'reflection',
+            `Reflection after HITL retry (confidence ${reflection.confidence.toFixed(2)}): ${shortPreview(reflection.summary, 200)}`,
+            {
+              confidence: reflection.confidence,
+              ok: reflection.ok,
+              afterRetry: true,
+              specialistOutputAuditId: outputAudit.entry.id
+            }
+          );
         }
       }
 
@@ -613,6 +745,7 @@ export class BrainOrchestrator {
         taskId,
         sessionId: opts?.sessionId,
         primaryCategory: interpreted.primaryCategory,
+        categories: interpreted.categories,
         canonicalQuery: interpreted.canonicalQuery,
         interpretedGoal: interpreted.interpretedGoal,
         tags: interpreted.tags,

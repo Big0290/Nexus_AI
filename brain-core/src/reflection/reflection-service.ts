@@ -11,7 +11,9 @@ function interpretationBlock(i: InterpretationResult | undefined, mask?: (s: str
   if (!i) return '';
   const m = mask ?? ((s: string) => s);
   const links = i.memoryLinks.map((l) => ({ ...l, note: m(l.note) }));
-  return `\n\n## Intake interpretation (categorize + memory cross-refs)\nInterpreted goal: ${m(i.interpretedGoal)}\nCategory: ${i.primaryCategory}\nTags: ${i.tags.map(m).join(', ')}\nConstraints: ${i.constraints.map(m).join('; ')}\nAssumptions: ${i.assumptions.map(m).join('; ')}\nMemory links: ${JSON.stringify(links)}\nSynthesized lessons: ${i.synthesizedLessons.map(m).join(' | ')}\nIntake confidence: ${i.confidence}\n`;
+  const cats = i.categories?.length ? i.categories.join(' | ') : i.primaryCategory;
+  const ack = i.intakeAcknowledgment ? `\nIntake acknowledgment: ${m(i.intakeAcknowledgment)}\n` : '';
+  return `\n\n## Intake interpretation (categorize + memory cross-refs)\nInterpreted goal: ${m(i.interpretedGoal)}\nCategories: ${cats}\nPrimary: ${i.primaryCategory}${ack}Tags: ${i.tags.map(m).join(', ')}\nConstraints: ${i.constraints.map(m).join('; ')}\nAssumptions: ${i.assumptions.map(m).join('; ')}\nMemory links: ${JSON.stringify(links)}\nSynthesized lessons: ${i.synthesizedLessons.map(m).join(' | ')}\nIntake confidence: ${i.confidence}\n`;
 }
 
 export interface ReflectionServiceOptions {
@@ -77,7 +79,7 @@ export class ReflectionService {
         ...lessons.slice(0, 5)
       ].slice(0, 8);
       return {
-        summary: `Mock plan for: ${mask(taskDescription).slice(0, 120)}${interpretation ? ` [${interpretation.primaryCategory}]` : ''}${sessionTranscript?.trim() ? ' (session context applied)' : ''}`,
+        summary: `Mock plan for: ${mask(taskDescription).slice(0, 120)}${interpretation ? ` [${interpretation.categories?.length ? interpretation.categories.join('/') : interpretation.primaryCategory}]` : ''}${sessionTranscript?.trim() ? ' (session context applied)' : ''}`,
         steps: [
           'Recall similar outcomes and avoid known failure modes',
           'Apply compliance masking before specialist I/O',
@@ -185,7 +187,7 @@ Return ONLY JSON:
         sessionBlock.trim() ? `Context:\n${sessionBlock}` : '',
         `Latest request: ${mask(taskDescription)}`,
         interpretation
-          ? `Intake: ${mask(interpretation.interpretedGoal)} [${interpretation.primaryCategory}]`
+          ? `Intake: ${mask(interpretation.interpretedGoal)} [${interpretation.categories.join(' | ')}]`
           : '',
         `Plan: ${mask(plan.summary)}`,
         `Steps:\n- ${plan.steps.map((s) => mask(s)).join('\n- ')}`

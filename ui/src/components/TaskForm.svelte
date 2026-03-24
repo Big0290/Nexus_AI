@@ -47,7 +47,7 @@
   }
 </script>
 
-<form class="card" onsubmit={submit}>
+<form class="task-form" onsubmit={submit}>
   <div class="row">
     <label class="type">
       Type
@@ -83,13 +83,9 @@
 </form>
 
 <style>
-  .card {
+  .task-form {
     display: grid;
-    gap: 0.45rem;
-    padding: 0.65rem 0.75rem;
-    border-radius: 0.5rem;
-    background: #141821;
-    border: 1px solid #2a2f3a;
+    gap: 0.5rem;
   }
 
   .row {
@@ -109,31 +105,39 @@
     display: grid;
     gap: 0.2rem;
     font-size: 0.72rem;
-    color: #9a9db0;
+    color: var(--text-muted, #8b92a8);
   }
 
   input,
   textarea {
     font: inherit;
     font-size: 0.85rem;
-    padding: 0.4rem 0.5rem;
-    border-radius: 0.35rem;
-    border: 1px solid #2f3542;
-    background: #0f1115;
-    color: #e8e8ec;
+    padding: 0.45rem 0.55rem;
+    border-radius: var(--radius-sm, 0.35rem);
+    border: 1px solid var(--border);
+    background: var(--bg-subtle, #0f1219);
+    color: var(--text);
     width: 100%;
     box-sizing: border-box;
     resize: vertical;
     min-height: 2.4rem;
   }
 
+  input:focus,
+  textarea:focus {
+    outline: none;
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+  }
+
   .send {
     font: inherit;
     font-size: 0.85rem;
-    padding: 0.45rem 0.85rem;
-    border-radius: 0.35rem;
-    border: 1px solid #3d6df4;
-    background: #2f4fd4;
+    font-weight: 600;
+    padding: 0.5rem 1rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--accent-border);
+    background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 85%, #1a3a8a) 0%, #2a4ab0 100%);
     color: #fff;
     cursor: pointer;
     height: fit-content;
@@ -146,22 +150,22 @@
 
   .err-box {
     margin: 0;
-    padding: 0.45rem 0.5rem;
-    border-radius: 0.35rem;
-    border: 1px solid #5c2a2a;
-    background: #1a1418;
+    padding: 0.5rem 0.55rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+    background: var(--danger-soft);
   }
 
   .err-title {
     display: block;
     font-size: 0.82rem;
-    color: #ffb4a8;
+    color: color-mix(in srgb, var(--danger) 90%, white);
     margin-bottom: 0.35rem;
   }
 
   .err-hint {
     margin: 0;
-    color: #d8c4c0;
+    color: var(--text-muted);
     font-size: 0.78rem;
     line-height: 1.45;
     white-space: pre-wrap;
@@ -174,7 +178,9 @@
     align-items: center;
     gap: 0.5rem;
     font-size: 0.72rem;
-    color: #8b8fa3;
+    color: var(--text-muted);
+    padding-top: 0.15rem;
+    border-top: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
   }
 
   .sess {
@@ -183,17 +189,22 @@
   }
 
   .sess.dim {
-    color: #6b7080;
+    color: var(--text-dim);
   }
 
   .newsess {
     font: inherit;
     font-size: 0.72rem;
-    padding: 0.15rem 0.45rem;
-    border-radius: 0.3rem;
-    border: 1px solid #3a4150;
-    background: #1a1f28;
-    color: #c9cad8;
+    padding: 0.2rem 0.5rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: var(--surface-elevated);
+    color: var(--text-muted);
     cursor: pointer;
+  }
+
+  .newsess:hover {
+    border-color: var(--border-strong);
+    color: var(--text);
   }
 </style>

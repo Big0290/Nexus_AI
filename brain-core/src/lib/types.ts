@@ -27,8 +27,10 @@ export interface OutcomeMemory {
   successScore: number | undefined;
   failureReason: string | undefined;
   timestamp: ISOTimestamp;
-  /** From intake (SQLite-indexed) */
+  /** From intake (SQLite-indexed); mirrors categories[0] when categories are stored */
   primaryCategory?: string;
+  /** Full intake taxonomy (JSON in SQLite); falls back to [primaryCategory] for legacy rows */
+  categories?: string[];
   canonicalQuery?: string;
   interpretedGoal?: string;
   tags?: string[];
@@ -69,7 +71,12 @@ export interface InterpretationResult {
   interpretedGoal: string;
   /** Used for memory search + strategy (may compress raw prompt) */
   canonicalQuery: string;
+  /** Ordered intake labels; first entry is indexed as primaryCategory */
+  categories: string[];
+  /** Same as categories[0]; kept for backward-compatible APIs and SQLite index */
   primaryCategory: string;
+  /** What the intake step believes it understood (esp. synthetic document teach) */
+  intakeAcknowledgment?: string;
   tags: string[];
   constraints: string[];
   assumptions: string[];
@@ -86,6 +93,8 @@ export interface ThoughtStreamEntry {
   timestamp: ISOTimestamp;
   phase: ThoughtPhase;
   message: string;
+  /** Optional short secondary line (safe summary; no raw PII). */
+  detail?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -104,6 +113,10 @@ export interface InterventionRequest {
   /** When kind === clarification — questions to present to the user */
   questions?: string[];
   rationale?: string;
+  /** Intake assumptions the user can confirm/reject (clarification / learning signal) */
+  assumptionOptions?: string[];
+  /** Intake constraints the user can confirm (clarification / learning signal) */
+  constraintOptions?: string[];
 }
 
 /**
@@ -164,7 +177,14 @@ export type HumanInterventionAction =
   | { type: 'approve'; humanInstruction?: string }
   | { type: 'inject_context'; humanInstruction: string }
   | { type: 'override_outcome'; outcome: 'success' | 'failure'; failureReason?: string }
-  | { type: 'clarification_reply'; answers: string };
+  | {
+      type: 'clarification_reply';
+      answers: string;
+      /** Assumptions the user marks as correct — injected into the next intake pass */
+      confirmedAssumptions?: string[];
+      /** Constraints the user marks as correct */
+      confirmedConstraints?: string[];
+    };
 
 /** Server-prepared document teach payload (masked text + provenance) */
 export interface DocumentTeachRunOptions {

@@ -4,31 +4,72 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { OutcomeMemory } from '../lib/types.js';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
-function rowToMemory(
-  row: {
-    id: string;
-    created_at: string;
-    task_type: string;
-    primary_category: string | null;
-    canonical_query: string | null;
-    interpreted_goal: string | null;
-    initial_plan: string;
-    result: string;
-    success_score: number | null;
-    failure_reason: string | null;
-    session_id: string | null;
-    task_id: string | null;
-    embedding: Buffer | null;
-  },
-  tags: string[]
-): OutcomeMemory {
+type OutcomeRow = {
+  id: string;
+  created_at: string;
+  task_type: string;
+  primary_category: string | null;
+  categories_json: string | null;
+  canonical_query: string | null;
+  interpreted_goal: string | null;
+  initial_plan: string;
+  result: string;
+  success_score: number | null;
+  failure_reason: string | null;
+  session_id: string | null;
+  task_id: string | null;
+  embedding: Buffer | null;
+};
+
+function dedupeCategoryList(cats: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const x of cats) {
+    const t = x.trim();
+    if (!t) continue;
+    const k = t.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(t);
+  }
+  return out.slice(0, 16);
+}
+
+function deriveCategories(categoriesJson: string | null, primary: string | null): string[] | undefined {
+  if (categoriesJson?.trim()) {
+    try {
+      const j = JSON.parse(categoriesJson) as unknown;
+      if (Array.isArray(j)) {
+        const c = j.filter((x): x is string => typeof x === 'string').map((s) => s.trim()).filter(Boolean);
+        if (c.length) return dedupeCategoryList(c);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  if (primary?.trim()) return [primary.trim()];
+  return undefined;
+}
+
+function categoriesToJson(categories: string[] | undefined, primaryFallback: string | undefined): string | null {
+  const cats = categories?.length
+    ? dedupeCategoryList(categories)
+    : primaryFallback?.trim()
+      ? [primaryFallback.trim()]
+      : [];
+  return cats.length ? JSON.stringify(cats) : null;
+}
+
+function rowToMemory(row: OutcomeRow, tags: string[]): OutcomeMemory {
+  const categories = deriveCategories(row.categories_json, row.primary_category);
   return {
     id: row.id,
     timestamp: row.created_at,
     taskType: row.task_type,
     primaryCategory: row.primary_category ?? undefined,
+    categories,
     canonicalQuery: row.canonical_query ?? undefined,
     interpretedGoal: row.interpreted_goal ?? undefined,
     initialPlan: row.initial_plan,
@@ -93,7 +134,15 @@ export class SqliteOutcomeStore {
       CREATE INDEX IF NOT EXISTS idx_outcome_tags_tag ON outcome_tags(tag);
     `);
     const v = this.db.prepare('SELECT value FROM schema_meta WHERE key = ?').get('version') as { value: string } | undefined;
-    const current = v ? Number(v.value) : 0;
+    let current = v ? Number(v.value) : 0;
+    if (current < 2) {
+      const cols = this.db.pragma('table_info(outcomes)') as { name: string }[];
+      if (!cols.some((c) => c.name === 'categories_json')) {
+        this.db.exec('ALTER TABLE outcomes ADD COLUMN categories_json TEXT');
+      }
+      this.db.prepare('INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)').run('version', '2');
+      current = 2;
+    }
     if (current < SCHEMA_VERSION) {
       this.db.prepare('INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)').run('version', String(SCHEMA_VERSION));
     }
@@ -117,6 +166,12 @@ export class SqliteOutcomeStore {
         if (!id) continue;
         const exists = this.db.prepare('SELECT 1 FROM outcomes WHERE id = ?').get(id);
         if (exists) continue;
+        const rawCats = m.categories;
+        const categoriesFromImport = Array.isArray(rawCats)
+          ? dedupeCategoryList(
+              (rawCats as unknown[]).filter((t): t is string => typeof t === 'string').map((s) => s.trim())
+            )
+          : undefined;
         const om: OutcomeMemory = {
           id,
           taskType: String(m.taskType ?? 'general'),
@@ -126,6 +181,7 @@ export class SqliteOutcomeStore {
           failureReason: typeof m.failureReason === 'string' ? m.failureReason : undefined,
           timestamp: String(m.timestamp ?? new Date().toISOString()),
           primaryCategory: typeof m.primaryCategory === 'string' ? m.primaryCategory : undefined,
+          categories: categoriesFromImport?.length ? categoriesFromImport : undefined,
           canonicalQuery: typeof m.canonicalQuery === 'string' ? m.canonicalQuery : undefined,
           interpretedGoal: typeof m.interpretedGoal === 'string' ? m.interpretedGoal : undefined,
           sessionId: typeof m.sessionId === 'string' ? m.sessionId : undefined,
@@ -159,18 +215,21 @@ export class SqliteOutcomeStore {
 
   insertOutcome(m: OutcomeMemory, embedding?: number[]): void {
     const emb = embedding?.length ? encodeEmbedding(embedding) : null;
+    const primary = m.primaryCategory ?? m.categories?.[0] ?? null;
+    const catJson = categoriesToJson(m.categories, m.primaryCategory);
     this.db
       .prepare(
         `INSERT INTO outcomes (
-          id, created_at, task_type, primary_category, canonical_query, interpreted_goal,
+          id, created_at, task_type, primary_category, categories_json, canonical_query, interpreted_goal,
           initial_plan, result, success_score, failure_reason, session_id, task_id, embedding
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         m.id,
         m.timestamp,
         m.taskType,
-        m.primaryCategory ?? null,
+        primary,
+        catJson,
         m.canonicalQuery ?? null,
         m.interpretedGoal ?? null,
         m.initialPlan,
@@ -193,6 +252,7 @@ export class SqliteOutcomeStore {
         | 'failureReason'
         | 'result'
         | 'primaryCategory'
+        | 'categories'
         | 'canonicalQuery'
         | 'interpretedGoal'
         | 'tags'
@@ -201,11 +261,22 @@ export class SqliteOutcomeStore {
   ): OutcomeMemory | undefined {
     const cur = this.getById(id);
     if (!cur) return undefined;
-    const next: OutcomeMemory = {
+    let next: OutcomeMemory = {
       ...cur,
       ...patch,
       tags: patch.tags !== undefined ? patch.tags : cur.tags
     };
+    if (patch.categories !== undefined) {
+      const cats = dedupeCategoryList(patch.categories.filter((c): c is string => typeof c === 'string'));
+      next.categories = cats.length ? cats : undefined;
+      next.primaryCategory = cats[0];
+    } else if (patch.primaryCategory !== undefined) {
+      const p = patch.primaryCategory?.trim();
+      next.primaryCategory = p || undefined;
+      next.categories = p ? [p] : undefined;
+    }
+    const catJson = categoriesToJson(next.categories, next.primaryCategory);
+    const primary = next.primaryCategory ?? next.categories?.[0] ?? null;
     this.db
       .prepare(
         `UPDATE outcomes SET
@@ -213,6 +284,7 @@ export class SqliteOutcomeStore {
           failure_reason = ?,
           result = ?,
           primary_category = ?,
+          categories_json = ?,
           canonical_query = ?,
           interpreted_goal = ?
         WHERE id = ?`
@@ -221,7 +293,8 @@ export class SqliteOutcomeStore {
         next.successScore ?? null,
         next.failureReason ?? null,
         next.result,
-        next.primaryCategory ?? null,
+        primary,
+        catJson,
         next.canonicalQuery ?? null,
         next.interpretedGoal ?? null,
         id
@@ -235,27 +308,11 @@ export class SqliteOutcomeStore {
   getById(id: string): OutcomeMemory | undefined {
     const row = this.db
       .prepare(
-        `SELECT id, created_at, task_type, primary_category, canonical_query, interpreted_goal,
+        `SELECT id, created_at, task_type, primary_category, categories_json, canonical_query, interpreted_goal,
           initial_plan, result, success_score, failure_reason, session_id, task_id, embedding
         FROM outcomes WHERE id = ?`
       )
-      .get(id) as
-      | {
-          id: string;
-          created_at: string;
-          task_type: string;
-          primary_category: string | null;
-          canonical_query: string | null;
-          interpreted_goal: string | null;
-          initial_plan: string;
-          result: string;
-          success_score: number | null;
-          failure_reason: string | null;
-          session_id: string | null;
-          task_id: string | null;
-          embedding: Buffer | null;
-        }
-      | undefined;
+      .get(id) as OutcomeRow | undefined;
     if (!row) return undefined;
     const tags = this.getTagsFor(id);
     return rowToMemory(row, tags);
@@ -280,50 +337,22 @@ export class SqliteOutcomeStore {
   listAllForEmbedding(): OutcomeMemory[] {
     const rows = this.db
       .prepare(
-        `SELECT id, created_at, task_type, primary_category, canonical_query, interpreted_goal,
+        `SELECT id, created_at, task_type, primary_category, categories_json, canonical_query, interpreted_goal,
           initial_plan, result, success_score, failure_reason, session_id, task_id, embedding
         FROM outcomes ORDER BY created_at ASC`
       )
-      .all() as {
-      id: string;
-      created_at: string;
-      task_type: string;
-      primary_category: string | null;
-      canonical_query: string | null;
-      interpreted_goal: string | null;
-      initial_plan: string;
-      result: string;
-      success_score: number | null;
-      failure_reason: string | null;
-      session_id: string | null;
-      task_id: string | null;
-      embedding: Buffer | null;
-    }[];
+      .all() as OutcomeRow[];
     return rows.map((r) => rowToMemory(r, this.getTagsFor(r.id)));
   }
 
   listRecent(limit: number): OutcomeMemory[] {
     const rows = this.db
       .prepare(
-        `SELECT id, created_at, task_type, primary_category, canonical_query, interpreted_goal,
+        `SELECT id, created_at, task_type, primary_category, categories_json, canonical_query, interpreted_goal,
           initial_plan, result, success_score, failure_reason, session_id, task_id, embedding
         FROM outcomes ORDER BY created_at DESC LIMIT ?`
       )
-      .all(limit) as {
-      id: string;
-      created_at: string;
-      task_type: string;
-      primary_category: string | null;
-      canonical_query: string | null;
-      interpreted_goal: string | null;
-      initial_plan: string;
-      result: string;
-      success_score: number | null;
-      failure_reason: string | null;
-      session_id: string | null;
-      task_id: string | null;
-      embedding: Buffer | null;
-    }[];
+      .all(limit) as OutcomeRow[];
     return rows.map((r) => rowToMemory(r, this.getTagsFor(r.id)));
   }
 
@@ -336,8 +365,11 @@ export class SqliteOutcomeStore {
     const conditions: string[] = [];
     const params: (string | number)[] = [];
     if (opts.category?.trim()) {
-      conditions.push('primary_category = ?');
-      params.push(opts.category.trim());
+      const c = opts.category.trim();
+      conditions.push(
+        `(primary_category = ? OR (categories_json IS NOT NULL AND EXISTS (SELECT 1 FROM json_each(categories_json) WHERE value = ?)))`
+      );
+      params.push(c, c);
     }
     if (opts.tag?.trim()) {
       conditions.push(`id IN (SELECT outcome_id FROM outcome_tags WHERE tag = ?)`);
@@ -351,35 +383,35 @@ export class SqliteOutcomeStore {
       params.push(needle, needle, needle, needle);
     }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-    const sql = `SELECT id, created_at, task_type, primary_category, canonical_query, interpreted_goal,
+    const sql = `SELECT id, created_at, task_type, primary_category, categories_json, canonical_query, interpreted_goal,
       initial_plan, result, success_score, failure_reason, session_id, task_id, embedding
       FROM outcomes ${where} ORDER BY created_at DESC LIMIT ?`;
     params.push(opts.limit);
-    const rows = this.db.prepare(sql).all(...params) as {
-      id: string;
-      created_at: string;
-      task_type: string;
-      primary_category: string | null;
-      canonical_query: string | null;
-      interpreted_goal: string | null;
-      initial_plan: string;
-      result: string;
-      success_score: number | null;
-      failure_reason: string | null;
-      session_id: string | null;
-      task_id: string | null;
-      embedding: Buffer | null;
-    }[];
+    const rows = this.db.prepare(sql).all(...params) as OutcomeRow[];
     return rows.map((r) => rowToMemory(r, this.getTagsFor(r.id)));
   }
 
   listCategories(): string[] {
-    const rows = this.db
+    const prim = this.db
       .prepare(
-        `SELECT DISTINCT primary_category FROM outcomes WHERE primary_category IS NOT NULL AND trim(primary_category) != '' ORDER BY primary_category`
+        `SELECT DISTINCT primary_category AS c FROM outcomes WHERE primary_category IS NOT NULL AND trim(primary_category) != ''`
       )
-      .all() as { primary_category: string }[];
-    return rows.map((r) => r.primary_category);
+      .all() as { c: string }[];
+    let fromJson: { c: string }[] = [];
+    try {
+      fromJson = this.db
+        .prepare(
+          `SELECT DISTINCT je.value AS c FROM outcomes o, json_each(o.categories_json) AS je
+           WHERE o.categories_json IS NOT NULL AND trim(je.value) != ''`
+        )
+        .all() as { c: string }[];
+    } catch {
+      /* json_each unavailable */
+    }
+    const set = new Set<string>();
+    for (const r of prim) set.add(r.c);
+    for (const r of fromJson) set.add(r.c);
+    return [...set].sort((a, b) => a.localeCompare(b));
   }
 
   listTags(): string[] {

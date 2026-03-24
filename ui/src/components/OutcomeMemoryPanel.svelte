@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { OutcomeMemory } from '../lib/types.js';
-  import { fetchMemory, fetchMemoryMeta, teachOutcome } from '../lib/api.js';
+  import { fetchMemory, fetchMemoryMeta, patchMemory, teachOutcome } from '../lib/api.js';
   import { summarizeBrainError } from '../lib/brain-errors.js';
   import { previewText } from '../lib/format.js';
 
@@ -19,6 +19,16 @@
   let loadErr = $state<string | null>(null);
   /** e.g. `om_abc:success` while that request is in flight */
   let teaching = $state<string | null>(null);
+  let editSaving = $state(false);
+  /** When set, dialog is open for this outcome id */
+  let editDraft = $state<{
+    id: string;
+    result: string;
+    interpretedGoal: string;
+    categoriesStr: string;
+    canonicalQuery: string;
+    tagsStr: string;
+  } | null>(null);
   let savedHint = $state<string | null>(null);
 
   let outcomes = $state<OutcomeMemory[]>([]);
@@ -91,12 +101,19 @@
     return teaching === `${id}:${o}`;
   }
 
+  function outcomeCategories(o: OutcomeMemory): string[] {
+    if (o.categories?.length) return o.categories;
+    if (o.primaryCategory?.trim()) return [o.primaryCategory.trim()];
+    return [];
+  }
+
   function expand(o: OutcomeMemory) {
     const meta = JSON.stringify(
       {
         id: o.id,
         taskType: o.taskType,
         primaryCategory: o.primaryCategory,
+        categories: outcomeCategories(o),
         tags: o.tags,
         canonicalQuery: o.canonicalQuery,
         timestamp: o.timestamp,
@@ -108,6 +125,59 @@
     );
     const body = [`## Plan`, o.initialPlan, ``, `## Result`, o.result].join('\n');
     openDetail(`Outcome · ${o.taskType} · ${o.id}`, body, meta);
+  }
+
+  function startEdit(o: OutcomeMemory) {
+    err = null;
+    editDraft = {
+      id: o.id,
+      result: o.result ?? '',
+      interpretedGoal: o.interpretedGoal ?? '',
+      categoriesStr: outcomeCategories(o).join(', '),
+      canonicalQuery: o.canonicalQuery ?? '',
+      tagsStr: (o.tags ?? []).join(', ')
+    };
+  }
+
+  function closeEdit() {
+    editDraft = null;
+  }
+
+  async function saveEdit() {
+    if (!editDraft) return;
+    err = null;
+    editSaving = true;
+    try {
+      const tags = editDraft.tagsStr
+        .split(/[,;]+/)
+        .map((t) => t.trim())
+        .filter(Boolean);
+      const categories = editDraft.categoriesStr
+        .split(/[,;]+/)
+        .map((t) => t.trim())
+        .filter(Boolean);
+      await patchMemory(editDraft.id, {
+        result: editDraft.result,
+        interpretedGoal: editDraft.interpretedGoal || undefined,
+        ...(categories.length ? { categories } : {}),
+        canonicalQuery: editDraft.canonicalQuery || undefined,
+        tags
+      });
+      await afterTeach();
+      savedHint = 'Outcome updated.';
+      setTimeout(() => {
+        savedHint = null;
+      }, 3500);
+      closeEdit();
+      await loadOutcomes();
+      await loadMeta();
+    } catch (e) {
+      const raw = e instanceof Error ? e.message : String(e);
+      const s = summarizeBrainError(raw);
+      err = `${s.title}: ${s.hint}`;
+    } finally {
+      editSaving = false;
+    }
   }
 </script>
 
@@ -162,10 +232,14 @@
           <span class="type">{o.taskType}</span>
           <time datetime={o.timestamp}>{new Date(o.timestamp).toLocaleString()}</time>
         </div>
-        {#if o.primaryCategory || (o.tags && o.tags.length)}
+        {#if outcomeCategories(o).length || (o.tags && o.tags.length)}
           <div class="meta2">
-            {#if o.primaryCategory}
-              <span class="cat">{o.primaryCategory}</span>
+            {#if outcomeCategories(o).length}
+              <span class="cats">
+                {#each outcomeCategories(o) as cat, i (`${oid}-cat-${i}`)}
+                  <span class="cat">{cat}</span>
+                {/each}
+              </span>
             {/if}
             {#if o.tags?.length}
               <span class="tags">{o.tags.join(' · ')}</span>
@@ -180,7 +254,10 @@
         </div>
         <p class="one">{previewText(o.result, 140)}</p>
         <div class="row2">
-          <button type="button" class="view" onclick={() => expand(o)}>View full</button>
+          <div class="leftacts">
+            <button type="button" class="view" onclick={() => expand(o)}>View full</button>
+            <button type="button" class="edit" onclick={() => startEdit(o)}>Edit</button>
+          </div>
           <div class="acts">
             <button
               type="button"
@@ -206,6 +283,45 @@
     {/each}
   </ul>
 </section>
+
+{#if editDraft}
+  <dialog class="editdlg" open>
+    <form
+      class="editform"
+      onsubmit={(e) => {
+        e.preventDefault();
+        void saveEdit();
+      }}
+    >
+      <h3 class="edith3">Edit outcome</h3>
+      <p class="editid"><code>{editDraft.id}</code></p>
+      <label class="elab">
+        Result
+        <textarea name="result" rows="6" bind:value={editDraft.result}></textarea>
+      </label>
+      <label class="elab">
+        Interpreted goal
+        <textarea name="interpretedGoal" rows="3" bind:value={editDraft.interpretedGoal}></textarea>
+      </label>
+      <label class="elab">
+        Categories (comma-separated)
+        <input type="text" bind:value={editDraft.categoriesStr} placeholder="knowledge, pdf, legal" />
+      </label>
+      <label class="elab">
+        Canonical query
+        <input type="text" bind:value={editDraft.canonicalQuery} />
+      </label>
+      <label class="elab">
+        Tags (comma-separated)
+        <input type="text" bind:value={editDraft.tagsStr} placeholder="tag1, tag2" />
+      </label>
+      <div class="editactions">
+        <button type="button" class="cancel" onclick={closeEdit} disabled={editSaving}>Cancel</button>
+        <button type="submit" class="save" disabled={editSaving}>{editSaving ? 'Saving…' : 'Save'}</button>
+      </div>
+    </form>
+  </dialog>
+{/if}
 
 <style>
   .card {
@@ -330,9 +446,21 @@
     line-height: 1.3;
   }
 
+  .cats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    align-items: center;
+  }
+
   .cat {
     color: #a8c4ff;
     font-weight: 500;
+    padding: 0.08rem 0.35rem;
+    border-radius: 0.25rem;
+    background: rgba(100, 140, 255, 0.12);
+    border: 1px solid rgba(100, 140, 255, 0.28);
+    font-size: 0.68rem;
   }
 
   .tags {
@@ -372,6 +500,13 @@
     z-index: 1;
   }
 
+  .leftacts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    align-items: center;
+  }
+
   .view {
     font: inherit;
     font-size: 0.75rem;
@@ -380,6 +515,17 @@
     border: 1px solid #3a4a6a;
     background: #1a2233;
     color: #a8c4ff;
+    cursor: pointer;
+  }
+
+  .edit {
+    font: inherit;
+    font-size: 0.75rem;
+    padding: 0.2rem 0.45rem;
+    border-radius: 0.3rem;
+    border: 1px solid #4a5a8a;
+    background: #1e2438;
+    color: #c8d4ff;
     cursor: pointer;
   }
 
@@ -436,5 +582,94 @@
     margin: 0.4rem 0.75rem 0;
     color: #ff8b7a;
     font-size: 0.82rem;
+  }
+
+  .editdlg {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    max-width: min(36rem, 96vw);
+    max-height: 90vh;
+    margin: auto;
+    padding: 0;
+    border: 1px solid var(--border, #2a2f3a);
+    border-radius: 0.5rem;
+    background: var(--surface-elevated, #161a24);
+    color: inherit;
+    box-shadow: 0 1rem 2.5rem rgba(0, 0, 0, 0.45);
+  }
+
+  .editdlg::backdrop {
+    background: rgba(6, 8, 12, 0.72);
+  }
+
+  .editform {
+    display: grid;
+    gap: 0.65rem;
+    padding: 1rem 1.1rem 1.1rem;
+    max-height: 90vh;
+    overflow: auto;
+  }
+
+  .edith3 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .editid {
+    margin: 0;
+    font-size: 0.72rem;
+    color: #8c8c9a;
+    word-break: break-all;
+  }
+
+  .elab {
+    display: grid;
+    gap: 0.25rem;
+    font-size: 0.75rem;
+    color: #9a9db0;
+  }
+
+  .elab textarea,
+  .elab input {
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+    min-height: 0;
+  }
+
+  .editactions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 0.35rem;
+  }
+
+  .editactions .cancel {
+    font: inherit;
+    font-size: 0.82rem;
+    padding: 0.4rem 0.75rem;
+    border-radius: 0.35rem;
+    border: 1px solid #3a4150;
+    background: transparent;
+    color: #c8c9d8;
+    cursor: pointer;
+  }
+
+  .editactions .save {
+    font: inherit;
+    font-size: 0.82rem;
+    padding: 0.4rem 0.85rem;
+    border-radius: 0.35rem;
+    border: 1px solid #3d6df4;
+    background: #2a3f80;
+    color: #e8ecff;
+    cursor: pointer;
+  }
+
+  .editactions button:disabled {
+    opacity: 0.55;
+    cursor: wait;
   }
 </style>

@@ -12,6 +12,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (sec
 
 ---
 
+## 2025-03-24 — Dashboard transparency, editable memory, richer thought stream
+
+### Added
+
+- **`PATCH /api/memory/:id`**: Partial update of stored outcomes (`result`, `interpretedGoal`, `primaryCategory`, `canonicalQuery`, `tags`, `successScore`, `failureReason`). **`BrainOrchestrator.updateOutcomeMemory`** wraps the SQLite store.
+- **UI — Knowledge**: **Edit** dialog on each outcome row; calls `patchMemory` from the client API.
+- **UI — Navigation**: Primary tabs grouped as **Run**, **Observe** (thought stream), **Review** (Interventions + Compliance sub-tabs), **Knowledge**, **System**. Global **pipeline** strip shows rough Brain phase from orchestrator state and latest thought.
+- **UI — Transparency**: Run tab “what happens next” blurb; System tab collapsible **How Nexus Brain works** (star topology steps).
+- **`ThoughtStreamEntry.detail`**: Optional second line on thought entries (safe summaries).
+- **Thought stream (backend)**: Richer `metadata` and details for recall (top match preview, `topMatches`), merged recall, strategy (lesson preview), spawn (prompt size, masked payload size, audit ids), reflection (confidence, masked output size; separate line after HITL retry).
+- **Thought stream (UI)**: Human-readable phase labels, inline chips from metadata, expand-in-place JSON, **JSON** button for full modal.
+
+### Changed
+
+- **Global CSS**: Design tokens in `app.css` (`--surface`, `--accent`, phase colors, etc.); shell styles updated to use variables.
+- **Reflection thought**: Replaced generic “Reflecting…” with a single post-reflection entry summarizing confidence and summary (plus retry path when applicable).
+
+### Documentation
+
+- **README**: Outcome memory API table including PATCH; pointer to Knowledge tab behaviors.
+
+---
+
 ## 2025-03-23 — Document ingest hardening & Law 25 alignment
 
 ### Security

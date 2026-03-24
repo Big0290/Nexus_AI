@@ -166,6 +166,27 @@ export async function teachOutcome(
   if (!res.ok) throw new Error(await errorBody(res));
 }
 
+export type OutcomeMemoryPatch = {
+  result?: string;
+  interpretedGoal?: string;
+  primaryCategory?: string;
+  categories?: string[];
+  canonicalQuery?: string;
+  tags?: string[];
+  successScore?: number;
+  failureReason?: string | null;
+};
+
+export async function patchMemory(outcomeId: string, patch: OutcomeMemoryPatch): Promise<{ updated: unknown }> {
+  const res = await fetch(`/api/memory/${encodeURIComponent(outcomeId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...apiKeyHeaders() },
+    body: JSON.stringify(patch)
+  });
+  if (!res.ok) throw new Error(await errorBody(res));
+  return res.json() as Promise<{ updated: unknown }>;
+}
+
 export async function fetchAudit(limit = 80): Promise<{ entries: unknown[] }> {
   const res = await fetch(`/api/audit?limit=${limit}`, { headers: { ...apiKeyHeaders() } });
   if (!res.ok) throw new Error(await res.text());
@@ -192,11 +213,22 @@ export async function fetchMemoryMeta(): Promise<{ categories: string[]; tags: s
   return res.json() as Promise<{ categories: string[]; tags: string[] }>;
 }
 
-export async function submitClarification(id: string, answers: string): Promise<void> {
+export async function submitClarification(
+  id: string,
+  opts: {
+    answers?: string;
+    confirmedAssumptions?: string[];
+    confirmedConstraints?: string[];
+  }
+): Promise<void> {
   const res = await fetch(`/api/interventions/${encodeURIComponent(id)}/clarify`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...apiKeyHeaders() },
-    body: JSON.stringify({ answers })
+    body: JSON.stringify({
+      answers: opts.answers ?? '',
+      ...(opts.confirmedAssumptions?.length ? { confirmedAssumptions: opts.confirmedAssumptions } : {}),
+      ...(opts.confirmedConstraints?.length ? { confirmedConstraints: opts.confirmedConstraints } : {})
+    })
   });
   if (!res.ok) throw new Error(await res.text());
 }

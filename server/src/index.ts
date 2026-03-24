@@ -373,11 +373,38 @@ app.post('/api/interventions/:id/inject', async (c) => {
 
 app.post('/api/interventions/:id/clarify', async (c) => {
   const id = c.req.param('id');
-  const body = await c.req.json<{ answers?: string }>();
-  const answers = body.answers?.trim();
-  if (!answers) return c.json({ error: 'answers is required' }, 400);
+  const body = await c.req.json<{
+    answers?: string;
+    confirmedAssumptions?: unknown;
+    confirmedConstraints?: unknown;
+  }>();
+  const answers = typeof body.answers === 'string' ? body.answers.trim() : '';
+  const confirmedAssumptions = Array.isArray(body.confirmedAssumptions)
+    ? body.confirmedAssumptions
+        .filter((x): x is string => typeof x === 'string' && x.trim() !== '')
+        .map((s) => s.trim())
+    : [];
+  const confirmedConstraints = Array.isArray(body.confirmedConstraints)
+    ? body.confirmedConstraints
+        .filter((x): x is string => typeof x === 'string' && x.trim() !== '')
+        .map((s) => s.trim())
+    : [];
+  if (!answers && confirmedAssumptions.length === 0 && confirmedConstraints.length === 0) {
+    return c.json(
+      {
+        error:
+          'Provide written answers and/or at least one confirmed assumption or constraint (see Human review UI).'
+      },
+      400
+    );
+  }
   try {
-    brain.submitHumanAction(id, { type: 'clarification_reply', answers });
+    brain.submitHumanAction(id, {
+      type: 'clarification_reply',
+      answers,
+      ...(confirmedAssumptions.length ? { confirmedAssumptions } : {}),
+      ...(confirmedConstraints.length ? { confirmedConstraints } : {})
+    });
     return c.json({ ok: true });
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
@@ -398,6 +425,44 @@ app.post('/api/interventions/:id/override', async (c) => {
   } catch (e) {
     return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
   }
+});
+
+app.patch('/api/memory/:id', async (c) => {
+  const id = c.req.param('id');
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const patch: {
+    result?: string;
+    interpretedGoal?: string;
+    primaryCategory?: string;
+    categories?: string[];
+    canonicalQuery?: string;
+    failureReason?: string;
+    successScore?: number;
+    tags?: string[];
+  } = {};
+  if (typeof body.result === 'string') patch.result = body.result;
+  if (typeof body.interpretedGoal === 'string') patch.interpretedGoal = body.interpretedGoal;
+  if (typeof body.primaryCategory === 'string') patch.primaryCategory = body.primaryCategory;
+  if (Array.isArray(body.categories)) {
+    patch.categories = body.categories.filter((c): c is string => typeof c === 'string');
+  }
+  if (typeof body.canonicalQuery === 'string') patch.canonicalQuery = body.canonicalQuery;
+  if (body.failureReason === null || typeof body.failureReason === 'string') {
+    patch.failureReason = body.failureReason ?? undefined;
+  }
+  if (typeof body.successScore === 'number' && Number.isFinite(body.successScore)) {
+    patch.successScore = Math.max(0, Math.min(1, body.successScore));
+  }
+  if (Array.isArray(body.tags)) {
+    const tags = body.tags.filter((t): t is string => typeof t === 'string');
+    patch.tags = tags;
+  }
+  if (Object.keys(patch).length === 0) {
+    return c.json({ error: 'No valid fields to update' }, 400);
+  }
+  const updated = await brain.updateOutcomeMemory(id, patch);
+  if (!updated) return c.json({ error: 'Outcome not found' }, 404);
+  return c.json({ ok: true, updated });
 });
 
 app.post('/api/memory/:id/teach', async (c) => {

@@ -2,14 +2,16 @@
   import type { ComplianceAuditEntry, OrchestratorState, ThoughtStreamEntry } from './lib/types.js';
   import { connectBrainEvents, fetchAudit, fetchOrchestratorState } from './lib/api.js';
   import { summarizeBrainError } from './lib/brain-errors.js';
-  import TaskForm from './components/TaskForm.svelte';
-  import DocumentTeachPanel from './components/DocumentTeachPanel.svelte';
+  import type { TaskRunResult } from './lib/types.js';
+  import RunPanel from './components/RunPanel.svelte';
   import ThoughtStream from './components/ThoughtStream.svelte';
   import InterventionQueue from './components/InterventionQueue.svelte';
   import CompliancePanel from './components/CompliancePanel.svelte';
   import OutcomeMemoryPanel from './components/OutcomeMemoryPanel.svelte';
   import FullContentModal from './components/FullContentModal.svelte';
   import BrainOverview from './components/BrainOverview.svelte';
+  import TaskPhaseStrip from './components/TaskPhaseStrip.svelte';
+  import HitlBanner from './components/HitlBanner.svelte';
 
   const initialState: OrchestratorState = {
     orchestratorId: 'brain-1',
@@ -34,13 +36,20 @@
   let audit = $state<ComplianceAuditEntry[]>([]);
   /** Bumps when side data should reload (memory panel listens). */
   let memoryRefresh = $state(0);
-  /** Last successful run (one line) */
+  type LastRunSnapshot = TaskRunResult & { receivedAt: string };
+
+  /** Last successful run (one line, for header when away from Run tab) */
   let lastSuccess = $state<string | null>(null);
+  /** Full payload from SSE task_complete — shown on Run tab */
+  let lastTaskResult = $state<LastRunSnapshot | null>(null);
   /** Last failed run — banner + optional modal */
   let taskError = $state<{ title: string; hint: string; detail: string } | null>(null);
 
-  type TabId = 'run' | 'stream' | 'hitl' | 'audit' | 'memory' | 'brain';
+  /** Primary IA: Run | Observe | Review | Knowledge | System */
+  type TabId = 'run' | 'observe' | 'review' | 'memory' | 'brain';
+  type ReviewPanelId = 'hitl' | 'audit';
   let tab = $state<TabId>('run');
+  let reviewPanel = $state<ReviewPanelId>('hitl');
 
   let detail = $state<{ title: string; body: string; meta?: string | null } | null>(null);
 
@@ -75,19 +84,24 @@
         orchestrator = ev.state as OrchestratorState;
         thoughts = orchestrator.thoughtStream;
       } else if (ev.type === 'task_complete' && 'result' in ev) {
-        const r = ev.result as {
-          status?: string;
-          finalResult?: string;
-          error?: string;
-        };
+        const r = ev.result as TaskRunResult;
+        const snap: LastRunSnapshot = { ...r, receivedAt: new Date().toISOString() };
+        lastTaskResult = snap;
         if (r.status === 'error' && r.error) {
           const s = summarizeBrainError(r.error);
           taskError = { title: s.title, hint: s.hint, detail: s.detail };
           lastSuccess = null;
         } else {
           taskError = null;
-          const bit = r.finalResult?.trim() ? r.finalResult!.slice(0, 280) : '';
-          lastSuccess = r.status === 'completed' ? (bit ? `Completed: ${bit}` : 'Completed') : `${r.status ?? 'done'}`;
+          const bit = r.finalResult?.trim() ? r.finalResult.trim().slice(0, 200) : '';
+          lastSuccess =
+            r.status === 'completed'
+              ? bit
+                ? `Completed · ${bit}${r.finalResult && r.finalResult.length > 200 ? '…' : ''}`
+                : 'Completed'
+              : r.status === 'awaiting_human'
+                ? 'Awaiting human (see Review → Human review)'
+                : `${r.status ?? 'done'}`;
         }
         void refreshSideData();
       }
@@ -96,14 +110,21 @@
     return off;
   });
 
-  const tabs: { id: TabId; label: string; hint: string }[] = [
-    { id: 'run', label: 'Run', hint: 'New task' },
-    { id: 'stream', label: 'Stream', hint: 'Thoughts' },
-    { id: 'hitl', label: 'HITL', hint: 'Interventions' },
-    { id: 'audit', label: 'Audit', hint: 'Law 25' },
-    { id: 'memory', label: 'Memory', hint: 'Outcomes' },
-    { id: 'brain', label: 'Brain', hint: 'Intake + health' }
+  const primaryNav: { id: TabId; label: string; hint: string }[] = [
+    { id: 'run', label: 'Run', hint: 'Tasks and document teach' },
+    { id: 'observe', label: 'Observe', hint: 'Thought stream and live reasoning' },
+    { id: 'review', label: 'Review', hint: 'Human review (HITL) and compliance audit' },
+    { id: 'memory', label: 'Knowledge', hint: 'Outcome memory — browse and edit' },
+    { id: 'brain', label: 'System', hint: 'Health, API key, session' }
   ];
+
+  const reviewNav: { id: ReviewPanelId; label: string; hint: string }[] = [
+    { id: 'hitl', label: 'Human review', hint: 'Approve, clarify, or override when the Brain pauses' },
+    { id: 'audit', label: 'Compliance', hint: 'Law 25 audit log' }
+  ];
+
+  const hitlCount = $derived(orchestrator.pendingInterventions.length);
+  const viewingHitl = $derived(tab === 'review' && reviewPanel === 'hitl');
 </script>
 
 <main class="shell">
@@ -117,7 +138,7 @@
           <span class="pill accent">processing</span>
         {/if}
         <span class="pill dim">{orchestrator.modelMode}</span>
-        <span class="pill dim">HITL {orchestrator.pendingInterventions.length}</span>
+        <span class="pill" class:hitl-wait={hitlCount > 0}>HITL {hitlCount}</span>
       </span>
     </div>
     {#if lastSuccess}
@@ -147,31 +168,71 @@
     </div>
   {/if}
 
-  <nav class="tabs" aria-label="Primary">
-    {#each tabs as t (t.id)}
+  <TaskPhaseStrip orchestrator={orchestrator} lastThoughtPhase={thoughts[0]?.phase ?? null} />
+
+  {#if hitlCount > 0 && !viewingHitl}
+    <HitlBanner
+      count={hitlCount}
+      onGoToInterventions={() => {
+        tab = 'review';
+        reviewPanel = 'hitl';
+      }}
+    />
+  {/if}
+
+  <nav class="nav-primary" aria-label="Primary">
+    {#each primaryNav as t (t.id)}
       <button
         type="button"
         class="tab"
         class:active={tab === t.id}
+        class:hitl-pending={t.id === 'review' && hitlCount > 0}
         title={t.hint}
         onclick={() => (tab = t.id)}
       >
         {t.label}
+        {#if t.id === 'review' && hitlCount > 0}
+          <span class="tab-badge" aria-hidden="true">{hitlCount}</span>
+        {/if}
       </button>
     {/each}
   </nav>
 
+  {#if tab === 'review'}
+    <nav class="nav-sub" aria-label="Review">
+      {#each reviewNav as r (r.id)}
+        <button
+          type="button"
+          class="subtab"
+          class:active={reviewPanel === r.id}
+          class:hitl-pending={r.id === 'hitl' && hitlCount > 0}
+          title={r.hint}
+          onclick={() => (reviewPanel = r.id)}
+        >
+          {r.label}
+        </button>
+      {/each}
+    </nav>
+  {/if}
+
   <section class="panel">
     {#if tab === 'run'}
-      <div class="run-stack">
-        <TaskForm />
-        <DocumentTeachPanel />
-      </div>
-    {:else if tab === 'stream'}
+      <RunPanel
+        lastTaskResult={lastTaskResult}
+        onClearLastResult={() => (lastTaskResult = null)}
+        onGoKnowledge={() => (tab = 'memory')}
+        onGoReview={() => {
+          tab = 'review';
+          reviewPanel = 'hitl';
+        }}
+        lastInterpretation={orchestrator.lastInterpretation}
+        processing={orchestrator.processing}
+      />
+    {:else if tab === 'observe'}
       <ThoughtStream entries={thoughts} {openDetail} />
-    {:else if tab === 'hitl'}
+    {:else if tab === 'review' && reviewPanel === 'hitl'}
       <InterventionQueue items={orchestrator.pendingInterventions} {openDetail} afterHitlAction={refreshSideData} />
-    {:else if tab === 'audit'}
+    {:else if tab === 'review' && reviewPanel === 'audit'}
       <CompliancePanel entries={audit} {openDetail} />
     {:else if tab === 'memory'}
       <OutcomeMemoryPanel {openDetail} refreshKey={memoryRefresh} afterTeach={refreshSideData} />
@@ -217,6 +278,7 @@
     font-size: 1.15rem;
     font-weight: 650;
     letter-spacing: -0.02em;
+    color: var(--text);
   }
 
   .pills {
@@ -229,69 +291,144 @@
     font-size: 0.72rem;
     padding: 0.15rem 0.45rem;
     border-radius: 999px;
-    border: 1px solid #2f3542;
-    color: #d0d3e6;
-    background: #141821;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    background: var(--surface);
   }
 
   .pill.dim {
-    color: #9a9db0;
+    color: var(--text-dim);
+  }
+
+  .pill.hitl-wait {
+    border-color: color-mix(in srgb, var(--phase-hitl) 55%, var(--border));
+    color: color-mix(in srgb, var(--phase-hitl) 92%, white);
+    background: color-mix(in srgb, var(--phase-hitl) 14%, var(--surface));
+    font-weight: 650;
+    animation: hitl-pulse 2.2s ease-in-out infinite;
+  }
+
+  @keyframes hitl-pulse {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--phase-hitl) 0%, transparent);
+    }
+    50% {
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--phase-hitl) 22%, transparent);
+    }
   }
 
   .pill.accent {
-    border-color: #2a6b5e;
-    background: #152a26;
-    color: #7dffc8;
+    border-color: color-mix(in srgb, var(--teal) 55%, var(--border));
+    background: var(--teal-soft);
+    color: var(--success);
   }
 
   .last {
     margin: 0;
     font-size: 0.78rem;
-    color: #9a9aaa;
+    color: var(--text-muted);
     max-width: min(42rem, 100%);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .tabs {
+  .nav-primary {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.25rem;
-    margin-bottom: 0.65rem;
-    padding-bottom: 0.35rem;
-    border-bottom: 1px solid #252b36;
+    gap: 0.35rem;
+    margin-bottom: 0.5rem;
+    padding-bottom: 0.45rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .nav-sub {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin: -0.15rem 0 0.65rem;
+    padding-left: 0.1rem;
   }
 
   .tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
     font: inherit;
-    font-size: 0.82rem;
-    padding: 0.35rem 0.65rem;
-    border-radius: 0.35rem;
+    font-size: 0.84rem;
+    font-weight: 500;
+    padding: 0.4rem 0.75rem;
+    border-radius: var(--radius-sm);
     border: 1px solid transparent;
     background: transparent;
-    color: #b4b8c9;
+    color: var(--text-muted);
     cursor: pointer;
+    transition:
+      background 0.12s ease,
+      color 0.12s ease,
+      border-color 0.12s ease;
   }
 
   .tab:hover {
-    background: #1a1f28;
-    color: #e8e9f0;
+    background: var(--surface-elevated);
+    color: var(--text);
   }
 
   .tab.active {
-    border-color: #3d6df4;
-    background: #1e2a4a;
-    color: #e8ecff;
+    border-color: var(--accent-border);
+    background: var(--accent-soft);
+    color: var(--text);
+  }
+
+  .tab.hitl-pending:not(.active) {
+    border-color: color-mix(in srgb, var(--phase-hitl) 45%, var(--border));
+    color: color-mix(in srgb, var(--phase-hitl) 88%, white);
+    background: color-mix(in srgb, var(--phase-hitl) 10%, var(--surface-elevated));
+  }
+
+  .tab-badge {
+    font-size: 0.62rem;
+    font-weight: 750;
+    min-width: 1.1rem;
+    height: 1.1rem;
+    padding: 0 0.28rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--phase-hitl) 88%, #400);
+    color: var(--bg);
+    line-height: 1.1rem;
+    text-align: center;
+  }
+
+  .subtab {
+    font: inherit;
+    font-size: 0.78rem;
+    padding: 0.28rem 0.55rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+
+  .subtab:hover {
+    border-color: var(--border-strong);
+    color: var(--text);
+  }
+
+  .subtab.active {
+    border-color: var(--violet);
+    color: var(--text);
+    background: color-mix(in srgb, var(--violet) 12%, var(--surface));
+  }
+
+  .subtab.hitl-pending:not(.active) {
+    border-color: color-mix(in srgb, var(--phase-hitl) 40%, var(--border));
+    color: color-mix(in srgb, var(--phase-hitl) 85%, white);
   }
 
   .panel {
     min-height: 12rem;
-  }
-
-  .run-stack {
-    display: grid;
-    gap: 0.75rem;
   }
 
   .alert {
@@ -302,13 +439,13 @@
     gap: 0.65rem 1rem;
     margin-bottom: 0.75rem;
     padding: 0.65rem 0.85rem;
-    border-radius: 0.45rem;
-    border: 1px solid #5c2a2a;
-    background: linear-gradient(135deg, #1f1418 0%, #1a1520 100%);
+    border-radius: var(--radius-sm);
+    border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+    background: var(--danger-soft);
   }
 
   .alert.error {
-    border-color: #8a3d3d;
+    border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
   }
 
   .alert-body {
@@ -320,7 +457,7 @@
     display: block;
     font-size: 0.88rem;
     font-weight: 650;
-    color: #ffb4a8;
+    color: color-mix(in srgb, var(--danger) 85%, white);
     margin-bottom: 0.35rem;
   }
 
@@ -328,7 +465,7 @@
     margin: 0;
     font-size: 0.8rem;
     line-height: 1.45;
-    color: #d8c4c0;
+    color: var(--text-muted);
   }
 
   .alert-actions {
@@ -342,20 +479,20 @@
     font: inherit;
     font-size: 0.78rem;
     padding: 0.35rem 0.65rem;
-    border-radius: 0.35rem;
-    border: 1px solid #6a4a4a;
-    background: #2a1f22;
-    color: #f0e0dc;
+    border-radius: var(--radius-sm);
+    border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+    background: var(--surface-elevated);
+    color: var(--text);
     cursor: pointer;
   }
 
   .alert-btn:hover {
-    background: #3a2a30;
+    background: var(--surface);
   }
 
   .alert-btn.ghost {
-    border-color: #3a4150;
+    border-color: var(--border);
     background: transparent;
-    color: #a8a9b8;
+    color: var(--text-muted);
   }
 </style>

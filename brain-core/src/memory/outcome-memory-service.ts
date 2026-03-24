@@ -116,7 +116,17 @@ export class OutcomeMemoryService {
   async updateOutcome(
     id: string,
     patch: Partial<
-      Pick<OutcomeMemory, 'successScore' | 'failureReason' | 'result' | 'primaryCategory' | 'canonicalQuery' | 'interpretedGoal' | 'tags'>
+      Pick<
+        OutcomeMemory,
+        | 'successScore'
+        | 'failureReason'
+        | 'result'
+        | 'primaryCategory'
+        | 'categories'
+        | 'canonicalQuery'
+        | 'interpretedGoal'
+        | 'tags'
+      >
     >
   ): Promise<OutcomeMemory | undefined> {
     return this.store.updateOutcome(id, patch);
@@ -129,7 +139,8 @@ export class OutcomeMemoryService {
 }
 
 function memorySearchKey(m: OutcomeMemory): string {
-  return [m.taskType, m.primaryCategory ?? '', m.initialPlan, m.result, m.failureReason ?? '', m.canonicalQuery ?? ''].join('\n');
+  const catBlock = (m.categories?.length ? m.categories : m.primaryCategory ? [m.primaryCategory] : []).join(' ');
+  return [m.taskType, catBlock, m.initialPlan, m.result, m.failureReason ?? '', m.canonicalQuery ?? ''].join('\n');
 }
 
 export { SqliteOutcomeStore };

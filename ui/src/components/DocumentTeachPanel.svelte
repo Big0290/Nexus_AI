@@ -67,11 +67,7 @@
   }
 </script>
 
-<section class="card">
-  <header class="head">
-    <h2>Teach from documents</h2>
-    <span class="meta">Upload → Law 25 mask → learner specialist → memory</span>
-  </header>
+<div class="teach">
   <form class="form" onsubmit={onUploadAndRun}>
     <label class="f">
       Optional task label
@@ -105,47 +101,24 @@
   {#if err}
     <p class="err" role="alert">{err}</p>
   {/if}
-</section>
+</div>
 
 <style>
-  .card {
-    border-radius: 0.5rem;
-    background: #141821;
-    border: 1px solid #2a2f3a;
-    padding: 0.65rem 0.75rem;
+  .teach {
     display: grid;
     gap: 0.5rem;
   }
 
-  .head {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: space-between;
-    align-items: baseline;
-    gap: 0.35rem;
-  }
-
-  h2 {
-    margin: 0;
-    font-size: 0.95rem;
-    font-weight: 600;
-  }
-
-  .meta {
-    font-size: 0.72rem;
-    color: #8c8c9a;
-  }
-
   .form {
     display: grid;
-    gap: 0.45rem;
+    gap: 0.5rem;
   }
 
   .f {
     display: grid;
     gap: 0.2rem;
     font-size: 0.72rem;
-    color: #9a9db0;
+    color: var(--text-muted, #8b92a8);
   }
 
   input[type='text'],
@@ -155,23 +128,34 @@
   }
 
   input[type='text'] {
-    padding: 0.4rem 0.5rem;
-    border-radius: 0.35rem;
-    border: 1px solid #2f3542;
-    background: #0f1115;
-    color: #e8e8ec;
+    padding: 0.45rem 0.55rem;
+    border-radius: var(--radius-sm, 0.35rem);
+    border: 1px solid var(--border);
+    background: var(--bg-subtle, #0f1219);
+    color: var(--text);
+  }
+
+  input[type='text']:focus {
+    outline: none;
+    border-color: color-mix(in srgb, var(--teal) 50%, var(--border));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--teal) 22%, transparent);
   }
 
   .send {
     font: inherit;
     font-size: 0.85rem;
-    padding: 0.45rem 0.85rem;
-    border-radius: 0.35rem;
-    border: 1px solid #2a6b5e;
-    background: #1a2e28;
-    color: #c6ffe8;
+    font-weight: 600;
+    padding: 0.5rem 1rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid color-mix(in srgb, var(--teal) 55%, var(--border));
+    background: linear-gradient(180deg, color-mix(in srgb, var(--teal) 35%, #14302a) 0%, #1a3d34 100%);
+    color: #d4fff0;
     cursor: pointer;
     width: fit-content;
+  }
+
+  .send:hover:not(:disabled) {
+    filter: brightness(1.06);
   }
 
   .send:disabled {
@@ -182,17 +166,22 @@
   .ok {
     margin: 0;
     font-size: 0.78rem;
-    color: #9ed9b8;
+    color: var(--success, #45c49a);
+    padding: 0.4rem 0.5rem;
+    border-radius: var(--radius-sm);
+    background: var(--teal-soft);
+    border: 1px solid color-mix(in srgb, var(--teal) 30%, var(--border));
   }
 
   code {
     font-size: 0.72rem;
     word-break: break-all;
+    color: var(--text-muted);
   }
 
   .err {
     margin: 0;
     font-size: 0.82rem;
-    color: #ff8b7a;
+    color: color-mix(in srgb, var(--danger) 95%, white);
   }
 </style>

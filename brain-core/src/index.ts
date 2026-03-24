@@ -1,4 +1,5 @@
 export * from './lib/types.js';
+export * from './lib/interpretation-normalize.js';
 export * from './memory/outcome-memory-service.js';
 export * from './memory/persistence.js';
 export * from './compliance/law25-auditor.js';

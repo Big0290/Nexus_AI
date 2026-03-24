@@ -77,4 +77,18 @@ describe('SqliteOutcomeStore', () => {
     expect(store.listCategories()).toEqual(['a', 'b']);
     expect(store.listTags()).toEqual(['y', 'z']);
   });
+
+  it('filters by any stored category in categories_json', () => {
+    dir = mkdtempSync(join(tmpdir(), 'nexus-sqlite-'));
+    store = new SqliteOutcomeStore(join(dir, 't.db'));
+    store.insertOutcome(
+      baseOm('c1', {
+        primaryCategory: 'alpha',
+        categories: ['alpha', 'beta'],
+        result: 'multi-cat'
+      })
+    );
+    expect(store.listFiltered({ limit: 10, category: 'beta' }).map((m) => m.id)).toEqual(['c1']);
+    expect(store.listCategories().sort()).toEqual(['alpha', 'beta']);
+  });
 });

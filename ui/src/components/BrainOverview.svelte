@@ -65,6 +65,23 @@
 </script>
 
 <div class="brain">
+  <details class="explainer">
+    <summary>How Nexus Brain works (star topology)</summary>
+    <ol class="flow">
+      <li><strong>Intake</strong> — interpret the goal (or synthetic intake for document teach).</li>
+      <li><strong>Recall</strong> — search similar outcomes in SQLite memory.</li>
+      <li><strong>Strategy</strong> — plan with lessons from past runs.</li>
+      <li><strong>Compliance</strong> — Law 25–style masking on plans and payloads where configured.</li>
+      <li><strong>Specialist</strong> — edge model executes with tools; inputs/outputs are audited.</li>
+      <li><strong>Reflection</strong> — quality check; may escalate to HITL.</li>
+      <li><strong>Memory</strong> — results are logged for future recall.</li>
+    </ol>
+    <p class="links">
+      Open <strong>Observe</strong> for the live thought stream and <strong>Review → Compliance</strong> for the audit
+      log.
+    </p>
+  </details>
+
   <section class="block">
     <h2>Runtime</h2>
     <p class="hint">
@@ -110,6 +127,9 @@
   <section class="block">
     <h2>Last intake (interpretation)</h2>
     {#if interpretation}
+      {#if interpretation.intakeAcknowledgment}
+        <p class="intake-ack">{interpretation.intakeAcknowledgment}</p>
+      {/if}
       <pre class="json">{JSON.stringify(interpretation, null, 2)}</pre>
     {:else}
       <p class="muted">No interpretation yet — run a task to populate intake.</p>
@@ -137,6 +157,38 @@
     gap: 1rem;
   }
 
+  .explainer {
+    padding: 0.65rem 0.85rem;
+    border-radius: var(--radius, 0.5rem);
+    border: 1px solid var(--border, #2a3142);
+    background: var(--surface, #12161f);
+  }
+
+  .explainer summary {
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.88rem;
+    color: var(--text, #e8eaf4);
+  }
+
+  .flow {
+    margin: 0.5rem 0 0;
+    padding-left: 1.2rem;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: var(--text-muted, #8b92a8);
+  }
+
+  .flow li {
+    margin-bottom: 0.25rem;
+  }
+
+  .links {
+    margin: 0.55rem 0 0;
+    font-size: 0.76rem;
+    color: var(--text-muted);
+  }
+
   h2 {
     margin: 0 0 0.35rem;
     font-size: 0.95rem;
@@ -148,6 +200,17 @@
     border-radius: 0.5rem;
     background: #141821;
     border: 1px solid #2a2f3a;
+  }
+
+  .intake-ack {
+    margin: 0 0 0.5rem;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    color: #b8c5e8;
+    padding: 0.45rem 0.55rem;
+    border-radius: 0.35rem;
+    border: 1px solid #2f3d5c;
+    background: #151a26;
   }
 
   .hint {

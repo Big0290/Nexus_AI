@@ -5,6 +5,10 @@ import type {
   SimilarOutcome
 } from '../lib/types.js';
 import type { TextCompletionModel } from '../lib/types.js';
+import {
+  normalizeInterpretationResult,
+  type InterpretationResultDraft
+} from '../lib/interpretation-normalize.js';
 
 export interface InterpretationServiceOptions {
   model: TextCompletionModel | null;
@@ -100,11 +104,13 @@ export class InterpretationService {
           ]
         : [];
       const confidence = vagueCreative ? 0.58 : 0.78;
-      return {
+      const taskCat = input.taskType || 'general';
+      return normalizeInterpretationResult({
         interpretedGoal: `Address: ${maskedPrompt.slice(0, 160)}`,
         canonicalQuery: maskedPrompt.slice(0, 400),
-        primaryCategory: input.taskType || 'general',
-        tags: ['mock', input.taskType || 'general'],
+        primaryCategory: taskCat,
+        categories: [taskCat, 'mock'],
+        tags: ['mock', taskCat],
         constraints: [],
         assumptions: vagueCreative
           ? ['User request is underspecified — prefer clarifying before executing']
@@ -112,8 +118,11 @@ export class InterpretationService {
         clarificationsNeeded,
         confidence,
         memoryLinks: links,
-        synthesizedLessons: ['Review similar outcomes before executing']
-      };
+        synthesizedLessons: ['Review similar outcomes before executing'],
+        intakeAcknowledgment: vagueCreative
+          ? 'Mock intake: vague or creative prompt — categories default to declared task type plus mock until live Gemini intake is enabled.'
+          : 'Mock intake: categories include declared task type and mock label; enable GEMINI_API_KEY for LLM classification.'
+      });
     }
 
     const sessionBlock = maskedSession
@@ -124,6 +133,8 @@ export class InterpretationService {
 Narrow the user's request, assign a category, and cross-reference ONLY the candidate outcome ids listed below (do not invent ids).
 
 When the user is vague, open-ended, or underspecified (e.g. "tell me a story", "help with something", "make it better"), prefer listing concrete clarifying questions in clarificationsNeeded instead of guessing genre, tone, audience, or constraints. Keep confidence lower when important details are missing.
+
+If the message contains a block "[User clarification / learning signal]" with "User confirmed these intake assumptions" or "User confirmed these constraints", treat those as authoritative: align assumptions, constraints, and categories with that human feedback; do not contradict confirmed items without listing clarificationsNeeded.
 
 Latest user message:
 ${maskedPrompt}
@@ -137,7 +148,9 @@ Return ONLY valid JSON with this shape:
 {
   "interpretedGoal": "string",
   "canonicalQuery": "string (compressed query for search/planning)",
-  "primaryCategory": "string",
+  "categories": ["string (ordered labels; first is primary focus)"],
+  "primaryCategory": "string (optional if same as categories[0])",
+  "intakeAcknowledgment": "string (one sentence: what you understood and why these categories)",
   "tags": ["string"],
   "constraints": ["string"],
   "assumptions": ["string"],
@@ -149,7 +162,7 @@ Return ONLY valid JSON with this shape:
 
     const res = await this.model.generateContent(prompt);
     const text = res.response.text();
-    const fallback: InterpretationResult = {
+    const fallback: InterpretationResultDraft = {
       interpretedGoal: maskedPrompt.slice(0, 200),
       canonicalQuery: maskedPrompt.slice(0, 400),
       primaryCategory: input.taskType,
@@ -161,17 +174,37 @@ Return ONLY valid JSON with this shape:
       memoryLinks: [],
       synthesizedLessons: []
     };
-    const parsed = safeParseJson<InterpretationResult>(text, fallback);
-    return {
-      ...parsed,
-      memoryLinks: sanitizeLinks(parsed.memoryLinks, validIds),
-      tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 20) : [],
+    const parsed = safeParseJson<InterpretationResultDraft & Record<string, unknown>>(text, fallback);
+    const merged: InterpretationResultDraft = {
+      interpretedGoal: typeof parsed.interpretedGoal === 'string' ? parsed.interpretedGoal : fallback.interpretedGoal,
+      canonicalQuery: typeof parsed.canonicalQuery === 'string' ? parsed.canonicalQuery : fallback.canonicalQuery,
+      primaryCategory:
+        typeof parsed.primaryCategory === 'string' ? parsed.primaryCategory : fallback.primaryCategory,
+      categories: Array.isArray(parsed.categories) ? (parsed.categories as unknown[]).filter((c): c is string => typeof c === 'string') : fallback.categories,
+      intakeAcknowledgment:
+        typeof parsed.intakeAcknowledgment === 'string' ? parsed.intakeAcknowledgment : fallback.intakeAcknowledgment,
+      tags: Array.isArray(parsed.tags) ? parsed.tags.filter((t): t is string => typeof t === 'string') : fallback.tags,
+      constraints: Array.isArray(parsed.constraints)
+        ? parsed.constraints.filter((t): t is string => typeof t === 'string')
+        : fallback.constraints,
+      assumptions: Array.isArray(parsed.assumptions)
+        ? parsed.assumptions.filter((t): t is string => typeof t === 'string')
+        : fallback.assumptions,
       clarificationsNeeded: Array.isArray(parsed.clarificationsNeeded)
-        ? parsed.clarificationsNeeded.slice(0, 10)
-        : [],
+        ? parsed.clarificationsNeeded.filter((t): t is string => typeof t === 'string')
+        : fallback.clarificationsNeeded,
+      confidence: typeof parsed.confidence === 'number' && Number.isFinite(parsed.confidence) ? parsed.confidence : fallback.confidence,
+      memoryLinks: Array.isArray(parsed.memoryLinks) ? parsed.memoryLinks : fallback.memoryLinks,
       synthesizedLessons: Array.isArray(parsed.synthesizedLessons)
-        ? parsed.synthesizedLessons.slice(0, 15)
-        : []
+        ? parsed.synthesizedLessons.filter((t): t is string => typeof t === 'string')
+        : fallback.synthesizedLessons
     };
+    return normalizeInterpretationResult({
+      ...merged,
+      memoryLinks: sanitizeLinks(merged.memoryLinks, validIds),
+      tags: merged.tags ? merged.tags.slice(0, 20) : [],
+      clarificationsNeeded: merged.clarificationsNeeded ? merged.clarificationsNeeded.slice(0, 10) : [],
+      synthesizedLessons: merged.synthesizedLessons ? merged.synthesizedLessons.slice(0, 15) : []
+    });
   }
 }

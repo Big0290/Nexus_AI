@@ -60,6 +60,17 @@ The server binds each successful upload to a session (`documentIngestId` on the 
 
 **Health / ops:** `GET /api/health` includes `uploadBusy`, `ingestStats` (upload success/failure counts and vision file count), orchestrator `busy` / processing flags, and basic config hints.
 
+### Outcome memory API
+
+| Method | Path | Notes |
+|--------|------|--------|
+| `GET` | `/api/memory` | Query: `limit`, optional `category`, `tag`, `q`. |
+| `GET` | `/api/memory/meta` | Lists categories and tags for filters. |
+| `PATCH` | `/api/memory/:id` | JSON body with any of: `result`, `interpretedGoal`, `primaryCategory`, `canonicalQuery`, `tags` (string array), `successScore` (0–1), `failureReason`. At least one field required. |
+| `POST` | `/api/memory/:id/teach` | Body: `outcome` (`success` \| `failure`), optional `failureReason` — quick relabel for training. |
+
+The dashboard **Knowledge** tab supports browsing, **Edit** (PATCH), and **+OK / +Fail** (teach).
+
 ### Ingest-related environment variables
 
 | Variable | Default | Purpose |
