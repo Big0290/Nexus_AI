@@ -4,6 +4,12 @@
   --radius-sm: 0.35rem;
   --space: 0.75rem;
 
+  /* App shell — spacing between header, nav, alerts, workspace */
+  --layout-gap: 0.65rem;
+  --layout-pad-inline: 1rem;
+  --layout-pad-block: 0.75rem;
+  --layout-max-width: min(1100px, 100% - 1.5rem);
+
   /* Base dark theme — slate + teal/violet accents */
   --bg: #0a0c12;
   --bg-subtle: #0f1219;
@@ -59,4 +65,82 @@ body {
 
 #app {
   min-height: 100vh;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Application shell — used by App.svelte root layout                          */
+/* -------------------------------------------------------------------------- */
+
+.app-shell {
+  box-sizing: border-box;
+  max-width: var(--layout-max-width);
+  margin-inline: auto;
+  padding: var(--layout-pad-block) var(--layout-pad-inline) 2.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--layout-gap);
+}
+
+.app-workspace {
+  flex: 1;
+  min-height: 12rem;
+  min-width: 0;
+}
+
+/* Secondary tab strips (e.g. Run → Chat | Teach | Prompt) — shared rhythm */
+.app-tabstrip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding: 0.15rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.app-tabstrip-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 0.38rem 0.75rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.app-tabstrip-btn:hover {
+  background: var(--surface-elevated);
+  color: var(--text);
+}
+
+.app-tabstrip-btn--active {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.app-tabstrip-btn--hitl:not(.app-tabstrip-btn--active) {
+  border-color: color-mix(in srgb, var(--phase-hitl) 45%, var(--border));
+  color: color-mix(in srgb, var(--phase-hitl) 88%, white);
+  background: color-mix(in srgb, var(--phase-hitl) 10%, var(--surface-elevated));
+}
+
+.app-tabstrip-badge {
+  font-size: 0.58rem;
+  font-weight: 750;
+  min-width: 1rem;
+  height: 1rem;
+  padding: 0 0.28rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--phase-hitl) 88%, #400);
+  color: var(--bg);
+  line-height: 1rem;
+  text-align: center;
 }

@@ -1,8 +1,14 @@
 <script lang="ts">
   import { postDocumentTeachTask, postTeachUpload } from '../lib/api.js';
   import { summarizeBrainError } from '../lib/brain-errors.js';
+  import { notifySessionUpdated } from '../lib/session-events.js';
 
   const SESSION_KEY = 'nexus_brain_session_id';
+
+  let { variant = 'default' } = $props<{
+    /** Tighter layout when embedded under the chat composer. */
+    variant?: 'default' | 'compact';
+  }>();
 
   let fileInput = $state<HTMLInputElement | null>(null);
   let focusNote = $state('');
@@ -25,6 +31,7 @@
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(SESSION_KEY, id);
     }
+    notifySessionUpdated();
     return id;
   }
 
@@ -45,6 +52,7 @@
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem(SESSION_KEY, up.sessionId);
       }
+      notifySessionUpdated();
       lastIngest = { ingestId: up.ingestId, maskedTextChars: up.maskedTextChars };
       const r = await postDocumentTeachTask({
         ingestId: up.ingestId,
@@ -56,6 +64,7 @@
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem(SESSION_KEY, r.sessionId);
       }
+      notifySessionUpdated();
       if (fileInput) fileInput.value = '';
     } catch (x) {
       const raw = x instanceof Error ? x.message : String(x);
@@ -67,7 +76,7 @@
   }
 </script>
 
-<div class="teach">
+<div class="teach" class:teach--compact={variant === 'compact'}>
   <form class="form" onsubmit={onUploadAndRun}>
     <label class="f">
       Optional task label
@@ -107,6 +116,14 @@
   .teach {
     display: grid;
     gap: 0.5rem;
+  }
+
+  .teach--compact {
+    gap: 0.4rem;
+  }
+
+  .teach--compact .f {
+    font-size: 0.7rem;
   }
 
   .form {

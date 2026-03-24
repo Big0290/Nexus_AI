@@ -13,11 +13,14 @@
   let {
     items = [] as InterventionRequest[],
     openDetail,
-    afterHitlAction = async () => {}
+    afterHitlAction = async () => {},
+    variant = 'page'
   } = $props<{
     items: InterventionRequest[];
     openDetail: (title: string, body: string, meta?: string | null) => void;
     afterHitlAction?: () => void | Promise<void>;
+    /** Compact header + scroll for embedding under Run → Chat. */
+    variant?: 'page' | 'embedded';
   }>();
 
   /** Optional note sent with approve (not the same as inject). */
@@ -120,7 +123,7 @@
   }
 
   async function clarify(id: string) {
-    const it = items.find((i) => i.requestId === id);
+    const it = items.find((i: InterventionRequest) => i.requestId === id);
     if (!it) return;
     const text = clarifyText[id]?.trim() ?? '';
     const aOpts = it.assumptionOptions ?? [];
@@ -128,8 +131,8 @@
     const pb = pickerBits[id];
     const rowA = pb?.assumptionChecks ?? aOpts.map(() => true);
     const rowC = pb?.constraintChecks ?? cOpts.map(() => true);
-    const confirmedA = aOpts.filter((_, i) => rowA[i]);
-    const confirmedC = cOpts.filter((_, i) => rowC[i]);
+    const confirmedA = aOpts.filter((_: string, i: number) => rowA[i]);
+    const confirmedC = cOpts.filter((_: string, i: number) => rowC[i]);
     const hasPickers = aOpts.length > 0 || cOpts.length > 0;
     const hasSignal =
       text.length > 0 || confirmedA.length > 0 || confirmedC.length > 0;
@@ -164,21 +167,33 @@
   }
 </script>
 
-<section class="hitl" aria-labelledby="hitl-heading">
-  <header class="hero">
-    <h2 id="hitl-heading">Human in the loop</h2>
-    <p class="lede">
-      When confidence is low or clarification is needed, the Brain <strong>stops and waits</strong>. For pre-flight
-      clarifications, confirm which <strong>AI assumptions and constraints</strong> are correct (learning signal for the
-      next intake), answer the questions, then submit.
-    </p>
-    <p class="meta-line">
-      <span class="count-pill">{items.length} open</span>
-      {#if items.length === 0}
-        <span class="all-clear">No action required right now.</span>
-      {/if}
-    </p>
-  </header>
+<section class="hitl" class:hitl--embedded={variant === 'embedded'} aria-labelledby="hitl-heading">
+  {#if variant === 'embedded'}
+    <header class="hero hero--embedded">
+      <div class="hero-embedded-top">
+        <h2 id="hitl-heading">Human review</h2>
+        <span class="count-pill">{items.length} open</span>
+      </div>
+      <p class="lede lede--embedded">
+        The Brain is paused — respond below. Full-width layout is still under <strong>Review → Human review</strong>.
+      </p>
+    </header>
+  {:else}
+    <header class="hero">
+      <h2 id="hitl-heading">Human in the loop</h2>
+      <p class="lede">
+        When confidence is low or clarification is needed, the Brain <strong>stops and waits</strong>. For pre-flight
+        clarifications, confirm which <strong>AI assumptions and constraints</strong> are correct (learning signal for the
+        next intake), answer the questions, then submit.
+      </p>
+      <p class="meta-line">
+        <span class="count-pill">{items.length} open</span>
+        {#if items.length === 0}
+          <span class="all-clear">No action required right now.</span>
+        {/if}
+      </p>
+    </header>
+  {/if}
 
   {#if flashMessage}
     <p class="flash" role="status">{flashMessage}</p>
@@ -385,7 +400,48 @@
     );
   }
 
-  .hero h2 {
+  .hero--embedded {
+    padding: 0.55rem 0.75rem 0.5rem;
+  }
+
+  .hero-embedded-top {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.35rem;
+  }
+
+  .hero-embedded-top h2 {
+    margin: 0;
+    font-size: 0.88rem;
+    font-weight: 650;
+    color: var(--text);
+    letter-spacing: -0.02em;
+  }
+
+  .lede--embedded {
+    margin: 0;
+    font-size: 0.72rem;
+    line-height: 1.45;
+    max-width: 40rem;
+  }
+
+  .hitl--embedded {
+    border-radius: var(--radius-sm);
+    margin-bottom: 0.5rem;
+  }
+
+  .hitl--embedded .list {
+    max-height: min(36vh, 22rem);
+  }
+
+  .hitl--embedded .card {
+    padding: 0.65rem 0.75rem;
+  }
+
+  .hero:not(.hero--embedded) h2 {
     margin: 0 0 0.35rem;
     font-size: 1rem;
     font-weight: 650;

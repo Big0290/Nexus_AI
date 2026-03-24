@@ -16,7 +16,8 @@
       interpretation &&
         !processing &&
         ((interpretation.assumptions?.length ?? 0) > 0 ||
-          (interpretation.constraints?.length ?? 0) > 0)
+          (interpretation.constraints?.length ?? 0) > 0 ||
+          (interpretation.memoryLinks?.length ?? 0) > 0)
     )
   );
 </script>
@@ -25,8 +26,8 @@
   <section class="snap" aria-labelledby="snap-h">
     <h3 id="snap-h" class="snap-title">Latest intake — AI assumptions</h3>
     <p class="snap-lede">
-      From the most recent interpretation. During <strong>Human review</strong>, you can toggle which lines still hold
-      so the next intake learns from your selections.
+      From the most recent interpretation. Retrieved outcomes are cross-referenced below. During <strong>Human review</strong>,
+      you can toggle which lines still hold so the next intake learns from your selections.
     </p>
     {#if interpretation.intakeAcknowledgment}
       <p class="ack">{interpretation.intakeAcknowledgment}</p>
@@ -47,6 +48,22 @@
         <ul class="items">
           {#each interpretation.constraints as c, i (i)}
             <li>{c}</li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
+    {#if interpretation.memoryLinks?.length}
+      <div class="block block-links">
+        <span class="lbl">Memory links (outcome ids)</span>
+        <ul class="link-list">
+          {#each interpretation.memoryLinks as ml, i (i)}
+            <li class="link-item">
+              <span class="rel rel-{ml.relevance}">{ml.relevance}</span>
+              <code class="oid" title={ml.outcomeId}>{ml.outcomeId}</code>
+              {#if ml.note?.trim()}
+                <span class="lnote">{ml.note}</span>
+              {/if}
+            </li>
           {/each}
         </ul>
       </div>
@@ -116,6 +133,64 @@
     font-size: 0.76rem;
     line-height: 1.45;
     color: var(--text-muted);
+  }
+
+  .block-links {
+    border-top: 1px dashed color-mix(in srgb, var(--border) 75%, transparent);
+    padding-top: 0.4rem;
+  }
+
+  .link-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 0.4rem;
+  }
+
+  .link-item {
+    display: grid;
+    gap: 0.15rem;
+    align-content: start;
+  }
+
+  .rel {
+    font-size: 0.58rem;
+    font-weight: 750;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    width: fit-content;
+    padding: 0.06rem 0.35rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+  }
+
+  .rel-supporting {
+    border-color: color-mix(in srgb, var(--success) 45%, var(--border));
+    color: var(--success);
+  }
+
+  .rel-cautionary {
+    border-color: color-mix(in srgb, var(--amber) 45%, var(--border));
+    color: var(--amber);
+  }
+
+  .rel-contrast {
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+    color: var(--accent);
+  }
+
+  .oid {
+    font-size: 0.65rem;
+    word-break: break-all;
+    color: var(--text-dim);
+  }
+
+  .lnote {
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    line-height: 1.35;
   }
 
   .snap-cta {

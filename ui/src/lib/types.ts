@@ -11,6 +11,7 @@ export type {
   InterventionRequest,
   OrchestratorState,
   OutcomeMemory,
+  SessionTurn,
   TaskContext,
   TaskRunResult,
   ThoughtPhase,

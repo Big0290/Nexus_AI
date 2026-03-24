@@ -118,7 +118,9 @@
         canonicalQuery: o.canonicalQuery,
         timestamp: o.timestamp,
         successScore: o.successScore,
-        failureReason: o.failureReason
+        failureReason: o.failureReason,
+        sessionId: o.sessionId ?? null,
+        taskId: o.taskId ?? null
       },
       null,
       2
@@ -232,6 +234,21 @@
           <span class="type">{o.taskType}</span>
           <time datetime={o.timestamp}>{new Date(o.timestamp).toLocaleString()}</time>
         </div>
+        {#if o.sessionId?.trim() || o.taskId?.trim()}
+          <p class="xref" title="Cross-references stored when this outcome was logged">
+            {#if o.sessionId?.trim()}
+              <span class="xref-bit"
+                >Session <code>{o.sessionId.slice(0, 8)}…</code></span
+              >
+            {/if}
+            {#if o.sessionId?.trim() && o.taskId?.trim()}
+              <span class="xref-sep">·</span>
+            {/if}
+            {#if o.taskId?.trim()}
+              <span class="xref-bit">Task <code>{o.taskId.slice(0, 8)}…</code></span>
+            {/if}
+          </p>
+        {/if}
         {#if outcomeCategories(o).length || (o.tags && o.tags.length)}
           <div class="meta2">
             {#if outcomeCategories(o).length}
@@ -425,6 +442,23 @@
     justify-content: space-between;
     gap: 0.5rem;
     font-size: 0.8rem;
+  }
+
+  .xref {
+    margin: 0;
+    font-size: 0.68rem;
+    color: var(--text-dim);
+    line-height: 1.35;
+  }
+
+  .xref-bit code {
+    font-size: 0.64rem;
+    word-break: break-all;
+  }
+
+  .xref-sep {
+    margin: 0 0.25rem;
+    opacity: 0.7;
   }
 
   .type {

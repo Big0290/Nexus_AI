@@ -15,12 +15,13 @@
       <div class="hitl-copy">
         <strong class="hitl-title">Human input needed</strong>
         <p class="hitl-desc">
-          The Brain has paused and is waiting for you to {count === 1 ? 'respond to 1 request' : `respond to ${count} requests`} under
-          <strong>Review → Human review</strong>. Nothing else will run until you choose an action.
+          The Brain has paused and is waiting for you to {count === 1 ? 'respond to 1 request' : `respond to ${count} requests`} — open
+          <strong>Run → Chat</strong> (embedded review) or <strong>Review → Human review</strong> for the full layout. Nothing else runs
+          until you choose an action.
         </p>
       </div>
       <button type="button" class="hitl-cta" onclick={onGoToInterventions}>
-        Open human review
+        Open Run
       </button>
     </div>
   </div>

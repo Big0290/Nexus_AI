@@ -1,8 +1,21 @@
 <script lang="ts">
   import { postTask } from '../lib/api.js';
   import { summarizeBrainError } from '../lib/brain-errors.js';
+  import { notifySessionUpdated } from '../lib/session-events.js';
 
   const SESSION_KEY = 'nexus_brain_session_id';
+
+  let {
+    variant = 'default',
+    reuseTap = 0,
+    reuseContent = ''
+  } = $props<{
+    /** Chat composer: full-width message, session row hidden (shown in parent toolbar). */
+    variant?: 'default' | 'chat';
+    /** When this increments, `description` is set to `reuseContent` (transcript refill). */
+    reuseTap?: number;
+    reuseContent?: string;
+  }>();
 
   let description = $state('');
   let taskType = $state('general');
@@ -17,6 +30,14 @@
     if (s) sessionId = s;
   });
 
+  let prevReuseTap = $state(0);
+  $effect(() => {
+    if (reuseTap > 0 && reuseTap !== prevReuseTap) {
+      prevReuseTap = reuseTap;
+      if (reuseContent.trim()) description = reuseContent;
+    }
+  });
+
   async function submit(e: Event) {
     e.preventDefault();
     errorTitle = null;
@@ -28,6 +49,7 @@
       if (typeof localStorage !== 'undefined') {
         localStorage.setItem(SESSION_KEY, r.sessionId);
       }
+      notifySessionUpdated();
       description = '';
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err);
@@ -44,34 +66,58 @@
     if (typeof localStorage !== 'undefined') {
       localStorage.removeItem(SESSION_KEY);
     }
+    notifySessionUpdated();
   }
 </script>
 
-<form class="task-form" onsubmit={submit}>
-  <div class="row">
-    <label class="type">
-      Type
-      <input name="taskType" bind:value={taskType} placeholder="general" autocomplete="off" />
-    </label>
-    <label class="desc">
-      Task
-      <textarea
-        name="description"
-        rows="2"
-        bind:value={description}
-        placeholder="What should the Brain do?"
-      ></textarea>
-    </label>
-    <button type="submit" class="send" disabled={busy || !description.trim()}>Run</button>
-  </div>
-  <div class="session-row">
-    {#if sessionId}
-      <span class="sess" title={sessionId}>Session: {sessionId.slice(0, 8)}…</span>
-      <button type="button" class="newsess" onclick={newSession}>New session</button>
-    {:else}
-      <span class="sess dim">New session id on first run</span>
-    {/if}
-  </div>
+<form class="task-form" class:task-form--chat={variant === 'chat'} onsubmit={submit}>
+  {#if variant === 'chat'}
+    <div class="chat-composer">
+      <label class="desc">
+        Message
+        <textarea
+          name="description"
+          rows="3"
+          bind:value={description}
+          placeholder="What should the Brain do?"
+        ></textarea>
+      </label>
+      <div class="chat-actions">
+        <label class="type">
+          Type
+          <input name="taskType" bind:value={taskType} placeholder="general" autocomplete="off" />
+        </label>
+        <button type="submit" class="send" disabled={busy || !description.trim()}>Send</button>
+      </div>
+    </div>
+  {:else}
+    <div class="row">
+      <label class="type">
+        Type
+        <input name="taskType" bind:value={taskType} placeholder="general" autocomplete="off" />
+      </label>
+      <label class="desc">
+        Task
+        <textarea
+          name="description"
+          rows="2"
+          bind:value={description}
+          placeholder="What should the Brain do?"
+        ></textarea>
+      </label>
+      <button type="submit" class="send" disabled={busy || !description.trim()}>Run</button>
+    </div>
+  {/if}
+  {#if variant !== 'chat'}
+    <div class="session-row">
+      {#if sessionId}
+        <span class="sess" title={sessionId}>Session: {sessionId.slice(0, 8)}…</span>
+        <button type="button" class="newsess" onclick={newSession}>New session</button>
+      {:else}
+        <span class="sess dim">New session id on first run</span>
+      {/if}
+    </div>
+  {/if}
   {#if errorTitle}
     <div class="err-box" role="alert">
       <strong class="err-title">{errorTitle}</strong>
@@ -99,6 +145,32 @@
     .row {
       grid-template-columns: 7.5rem minmax(0, 1fr) auto;
     }
+  }
+
+  .chat-composer {
+    display: grid;
+    gap: 0.45rem;
+  }
+
+  .chat-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 0.45rem;
+    justify-content: flex-end;
+  }
+
+  .chat-actions .type {
+    flex: 1 1 6.5rem;
+    max-width: 10rem;
+  }
+
+  .chat-actions .send {
+    flex-shrink: 0;
+  }
+
+  .task-form--chat {
+    gap: 0.4rem;
   }
 
   label {
