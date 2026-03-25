@@ -21,7 +21,10 @@ import { formatSessionTranscript } from '../session/session-store.js';
 import { newId } from '../util/id.js';
 import { brainLog } from '../util/log.js';
 import { shouldRequestClarification } from './clarify-policy.js';
-import { syntheticInterpretationForDocumentTeach } from './document-teach.js';
+import {
+  syntheticInterpretationForDocumentTeach,
+  syntheticInterpretationForWebTeach
+} from './document-teach.js';
 import { mergeSimilarOutcomes } from '../util/similar-outcomes.js';
 
 const DEFAULT_CONFIDENCE = 0.7;
@@ -63,7 +66,7 @@ export interface RunTaskOptions {
   sessionId?: string;
   /** Turns before the current user message (excludes latest prompt) */
   priorSessionTurns?: SessionTurn[];
-  /** When taskType is document_teach — masked extract + provenance from server ingest */
+  /** When taskType is document_teach or web_teach — masked extract + provenance from server ingest */
   documentTeach?: DocumentTeachRunOptions;
 }
 
@@ -260,14 +263,20 @@ export class BrainOrchestrator {
     brainLog('task', `start ${taskId} (${taskType})`, { sessionId: opts?.sessionId });
 
     try {
-      if (taskType === 'document_teach' && !opts?.documentTeach) {
-        throw new Error('document_teach requires ingest payload; upload documents first.');
+      if (
+        (taskType === 'document_teach' || taskType === 'web_teach') &&
+        !opts?.documentTeach
+      ) {
+        throw new Error('document_teach or web_teach requires ingest payload; upload or crawl first.');
       }
 
       let workingDescription = description;
-      const isDocTeach = taskType === 'document_teach' && Boolean(opts?.documentTeach);
+      const isIngestTeach =
+        (taskType === 'document_teach' || taskType === 'web_teach') && Boolean(opts?.documentTeach);
+      const webDerivedIntake =
+        taskType === 'web_teach' || opts?.documentTeach?.source === 'web_crawl';
 
-      if (isDocTeach && opts?.documentTeach) {
+      if (isIngestTeach && opts?.documentTeach) {
         const dt = opts.documentTeach;
         task.metadata = {
           ...task.metadata,
@@ -283,7 +292,7 @@ export class BrainOrchestrator {
         ].join('\n');
       }
 
-      const recallQuery = isDocTeach
+      const recallQuery = isIngestTeach
         ? `${description.trim()} ${opts!.documentTeach!.sourceFiles.map((f) => f.name).join(' ')}`
         : workingDescription;
 
@@ -313,17 +322,19 @@ export class BrainOrchestrator {
           : undefined
       );
 
-      // 2) Intake: LLM interpret — or synthetic for document_teach
+      // 2) Intake: LLM interpret — or synthetic for document_teach / web_teach
       let interpreted: InterpretationResult;
       let interpretAudit: { masked: string; entry: ComplianceAuditEntry };
 
-      if (isDocTeach && opts?.documentTeach) {
-        interpreted = syntheticInterpretationForDocumentTeach(description, opts.documentTeach);
+      if (isIngestTeach && opts?.documentTeach) {
+        interpreted = webDerivedIntake
+          ? syntheticInterpretationForWebTeach(description, opts.documentTeach)
+          : syntheticInterpretationForDocumentTeach(description, opts.documentTeach);
         this.state.lastInterpretation = structuredClone(interpreted);
         interpretAudit = this.auditor.auditPayload('brain_internal', JSON.stringify(interpreted));
         this.pushThought(
           'ingest',
-          `Document teach (synthetic intake): ${intakeCategoriesPreview(interpreted)} · ingest ${opts.documentTeach.ingestId}`,
+          `${webDerivedIntake ? 'Web' : 'Document'} teach (synthetic intake): ${intakeCategoriesPreview(interpreted)} · ingest ${opts.documentTeach.ingestId}`,
           {
             categories: interpreted.categories,
             category: interpreted.primaryCategory,
@@ -363,7 +374,7 @@ export class BrainOrchestrator {
       }
 
       // 2b) Pre-flight clarification (reduce wrong assumptions before strategy/specialist)
-      if (!isDocTeach && this.shouldAskClarification(interpreted)) {
+      if (!isIngestTeach && this.shouldAskClarification(interpreted)) {
         const clarifyIntervention: InterventionRequest = {
           kind: 'clarification',
           requestId: newId('int'),
@@ -416,8 +427,10 @@ export class BrainOrchestrator {
             }
             workingDescription = `${workingDescription}\n\n[User clarification / learning signal]:\n${parts.join('\n')}`;
             similar = await this.memory.searchSimilar(workingDescription, 8);
-            if (isDocTeach && opts?.documentTeach) {
-              interpreted = syntheticInterpretationForDocumentTeach(description, opts.documentTeach);
+            if (isIngestTeach && opts?.documentTeach) {
+              interpreted = webDerivedIntake
+                ? syntheticInterpretationForWebTeach(description, opts.documentTeach)
+                : syntheticInterpretationForDocumentTeach(description, opts.documentTeach);
               this.state.lastInterpretation = structuredClone(interpreted);
               interpretAudit = this.auditor.auditPayload('brain_internal', JSON.stringify(interpreted));
             } else {
@@ -503,14 +516,22 @@ export class BrainOrchestrator {
       // 4) Specialist spawning (prompt)
       this.state.status = 'executing';
       this.state.agentState.status = 'executing';
-      const systemPrompt = isDocTeach
-        ? await this.reflection.buildDocumentLearnerSystemPrompt(
-            taskLine,
-            plan,
-            sessionTranscript || undefined,
-            interpreted,
-            { mask }
-          )
+      const systemPrompt = isIngestTeach
+        ? webDerivedIntake
+          ? await this.reflection.buildWebLearnerSystemPrompt(
+              taskLine,
+              plan,
+              sessionTranscript || undefined,
+              interpreted,
+              { mask }
+            )
+          : await this.reflection.buildDocumentLearnerSystemPrompt(
+              taskLine,
+              plan,
+              sessionTranscript || undefined,
+              interpreted,
+              { mask }
+            )
         : await this.reflection.buildSpecialistSystemPrompt(
             taskLine,
             plan,
@@ -525,18 +546,20 @@ export class BrainOrchestrator {
 
       const docPayloadMax = 120_000;
       let userPayload: string;
-      if (isDocTeach && opts?.documentTeach) {
+      if (isIngestTeach && opts?.documentTeach) {
         const dt = opts.documentTeach;
         const docExcerpt = dt.maskedDocumentText.slice(0, docPayloadMax);
+        const specialistMode = webDerivedIntake ? 'web_teach' : 'document_teach';
         userPayload = JSON.stringify({
           task: taskLine,
-          mode: 'document_teach',
+          mode: specialistMode,
           ingestId: dt.ingestId,
           sourceFiles: dt.sourceFiles,
           documentText: docExcerpt,
           documentTruncated: dt.maskedDocumentText.length > docPayloadMax,
           rawUserMessage: workingDescription.slice(0, 8000),
           taskType,
+          ...(dt.crawlSummary ? { crawlSummary: dt.crawlSummary } : {}),
           interpretation: {
             goal: interpreted.interpretedGoal,
             category: interpreted.primaryCategory,
@@ -683,18 +706,20 @@ export class BrainOrchestrator {
         }
 
         if (instruction) {
-          if (isDocTeach && opts?.documentTeach) {
+          if (isIngestTeach && opts?.documentTeach) {
             const dt = opts.documentTeach;
             const docExcerpt = dt.maskedDocumentText.slice(0, docPayloadMax);
+            const specialistMode = webDerivedIntake ? 'web_teach' : 'document_teach';
             userPayload = JSON.stringify({
               task: taskLine,
-              mode: 'document_teach',
+              mode: specialistMode,
               ingestId: dt.ingestId,
               sourceFiles: dt.sourceFiles,
               documentText: docExcerpt,
               documentTruncated: dt.maskedDocumentText.length > docPayloadMax,
               rawUserMessage: workingDescription.slice(0, 8000),
               taskType,
+              ...(dt.crawlSummary ? { crawlSummary: dt.crawlSummary } : {}),
               plan: plan.summary,
               humanInstruction: instruction
             });

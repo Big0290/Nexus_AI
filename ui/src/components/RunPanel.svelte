@@ -261,9 +261,10 @@
   {:else if runSection === 'teach'}
     <div class="run-tab-panel run-tab-panel--padded" role="tabpanel" id="run-panel-teach" aria-labelledby="run-tab-teach">
       <div class="run-tab-intro">
-        <h2 class="run-tab-title">Teach from documents</h2>
+        <h2 class="run-tab-title">Teach the Brain</h2>
         <p class="run-tab-lede">
-          Upload files — content is Law 25–masked on the server, then learned into memory for your session.
+          Add knowledge from <strong>files</strong> or a <strong>respectful web crawl</strong> (seed URL). Everything is
+          Law 25–masked on the server before models run, then stored for <strong>this browser session</strong>.
         </p>
       </div>
       <DocumentTeachPanel />

@@ -122,6 +122,98 @@ export async function postDocumentTeachTask(opts: {
   });
 }
 
+/** Mirrors server `WebCrawlDiagnostics` for failed POST /api/teach/crawl responses. */
+export type CrawlDiagnosticsPayload = {
+  seedUrl: string;
+  userAgent: string;
+  pagesTried: Array<{
+    url: string;
+    depth: number;
+    skippedReason?: string;
+    statusCode?: number;
+  }>;
+  crawlJob: Record<string, unknown>;
+  robotsTxtByOrigin: Record<
+    string,
+    { robotsUrl: string; body: string; fetchError?: string; httpStatus?: number }
+  >;
+  lastHtmlFetchError?: string;
+};
+
+export class CrawlRequestError extends Error {
+  readonly crawlDiagnostics?: CrawlDiagnosticsPayload;
+
+  constructor(message: string, crawlDiagnostics?: CrawlDiagnosticsPayload) {
+    super(message);
+    this.name = 'CrawlRequestError';
+    this.crawlDiagnostics = crawlDiagnostics;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+export async function postTeachCrawl(opts: {
+  seedUrl: string;
+  sessionId?: string | null;
+  maxPages?: number;
+  maxDepth?: number;
+  attestationAccepted?: boolean;
+  allowedHosts?: string[];
+  /** Server honors this only when WEB_CRAWL_ALLOW_IGNORE_ROBOTS=1. */
+  ignoreRobots?: boolean;
+}): Promise<{
+  ingestId: string;
+  sessionId: string;
+  maskedTextChars: number;
+  sourceFiles: { name: string; mime: string }[];
+}> {
+  const res = await fetch('/api/teach/crawl', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...apiKeyHeaders() },
+    body: JSON.stringify({
+      seedUrl: opts.seedUrl.trim(),
+      ...(opts.sessionId?.trim() ? { sessionId: opts.sessionId.trim() } : {}),
+      ...(opts.maxPages != null && Number.isFinite(opts.maxPages) ? { maxPages: opts.maxPages } : {}),
+      ...(opts.maxDepth != null && Number.isFinite(opts.maxDepth) ? { maxDepth: opts.maxDepth } : {}),
+      ...(opts.attestationAccepted ? { attestationAccepted: true } : {}),
+      ...(opts.allowedHosts?.length ? { allowedHosts: opts.allowedHosts } : {}),
+      ...(opts.ignoreRobots ? { ignoreRobots: true } : {})
+    })
+  });
+  const j = (await res.json().catch(() => ({}))) as {
+    error?: string;
+    crawlDiagnostics?: CrawlDiagnosticsPayload;
+    ingestId?: string;
+    sessionId?: string;
+    maskedTextChars?: number;
+    sourceFiles?: { name: string; mime: string }[];
+  };
+  if (!res.ok) {
+    const msg =
+      typeof j.error === 'string' && j.error.trim()
+        ? j.error.trim()
+        : `${res.status} ${res.statusText}`;
+    throw new CrawlRequestError(msg, j.crawlDiagnostics);
+  }
+  return j as {
+    ingestId: string;
+    sessionId: string;
+    maskedTextChars: number;
+    sourceFiles: { name: string; mime: string }[];
+  };
+}
+
+export async function postWebTeachTask(opts: {
+  ingestId: string;
+  description?: string;
+  focusNote?: string;
+  sessionId?: string | null;
+}): Promise<{ sessionId: string }> {
+  return postTask(opts.description ?? '', 'web_teach', opts.sessionId, {
+    ingestId: opts.ingestId,
+    focusNote: opts.focusNote
+  });
+}
+
 export async function approveIntervention(id: string, humanInstruction?: string): Promise<void> {
   const res = await fetch(`/api/interventions/${encodeURIComponent(id)}/approve`, {
     method: 'POST',

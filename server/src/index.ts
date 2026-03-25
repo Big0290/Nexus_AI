@@ -9,6 +9,8 @@ import { cors } from 'hono/cors';
 import { streamSSE } from 'hono/streaming';
 import { createBrainRuntime } from './brain-runtime.js';
 import { ingestUploadedFiles, isSafeIngestId, loadDocumentIngest } from './document-ingest.js';
+import { ingestWebCrawl } from './web-crawl-ingest.js';
+import { WebCrawlIngestError } from './web-crawl-error.js';
 import { scheduleUploadCleanup } from './upload-cleanup.js';
 
 const DATA_DIR = process.env.DATA_DIR ?? './data';
@@ -28,16 +30,23 @@ const UPLOAD_MAX_PER_FILE_BYTES =
   1024 *
   1024;
 const GEMINI_VISION_ON_INGEST = process.env.GEMINI_VISION_ON_INGEST !== '0' && process.env.GEMINI_VISION_ON_INGEST !== 'false';
+const WEB_CRAWL_MAX_TOTAL_BYTES_ENV = (() => {
+  const v = process.env.WEB_CRAWL_MAX_TOTAL_MB;
+  if (v === undefined || v === '') return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n * 1024 * 1024 : undefined;
+})();
 const UPLOAD_TTL_DAYS = process.env.UPLOAD_TTL_DAYS ? Number(process.env.UPLOAD_TTL_DAYS) : 30;
 const UPLOAD_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 const ingestStats = {
   uploadsOk: 0,
+  crawlOk: 0,
   uploadFailures: 0,
   visionFiles: 0
 };
 
-let uploadBusy = false;
+let ingestBusy = false;
 
 const SQLITE_PATH = process.env.SQLITE_PATH?.trim();
 const CLARIFY_MIN = process.env.CLARIFY_MIN_CONFIDENCE
@@ -102,7 +111,8 @@ app.get('/api/health', (c) => {
     ok: true,
     busy: busy || st.processing,
     serverQueueBusy: busy,
-    uploadBusy,
+    uploadBusy: ingestBusy,
+    ingestBusy,
     orchestratorProcessing: st.processing,
     model: st.modelMode,
     authEnabled: Boolean(API_KEY),
@@ -144,8 +154,8 @@ app.get('/api/session/:id', async (c) => {
 });
 
 app.post('/api/teach/upload', async (c) => {
-  if (uploadBusy) {
-    return c.json({ error: 'Upload in progress' }, 429);
+  if (ingestBusy) {
+    return c.json({ error: 'Ingest in progress (upload or crawl)' }, 429);
   }
   const body = await c.req.parseBody({ all: true });
   const raw = body.files;
@@ -190,7 +200,7 @@ app.post('/api/teach/upload', async (c) => {
   }
 
   const t0 = Date.now();
-  uploadBusy = true;
+  ingestBusy = true;
   try {
     const result = await ingestUploadedFiles({
       dataDir: DATA_DIR,
@@ -206,6 +216,7 @@ app.post('/api/teach/upload', async (c) => {
     console.log(
       JSON.stringify({
         event: 'ingest_complete',
+        source: 'upload',
         ingestId: result.ingestId,
         sessionId,
         fileCount: buffers.length,
@@ -235,7 +246,110 @@ app.post('/api/teach/upload', async (c) => {
     console.error('ingest failed', e);
     return c.json({ error: message }, 500);
   } finally {
-    uploadBusy = false;
+    ingestBusy = false;
+  }
+});
+
+type TeachCrawlBody = {
+  sessionId?: string;
+  seedUrl?: string;
+  maxPages?: number;
+  maxDepth?: number;
+  attestationAccepted?: boolean;
+  allowedHosts?: string[];
+  /** Honored only when WEB_CRAWL_ALLOW_IGNORE_ROBOTS=1 (dev/testing). */
+  ignoreRobots?: boolean;
+};
+
+app.post('/api/teach/crawl', async (c) => {
+  if (ingestBusy) {
+    return c.json({ error: 'Ingest in progress (upload or crawl)' }, 429);
+  }
+  const body = (await c.req.json().catch(() => ({}))) as TeachCrawlBody;
+
+  let sessionId =
+    typeof body.sessionId === 'string' && body.sessionId.trim() ? body.sessionId.trim() : '';
+  if (!sessionId) {
+    sessionId = randomUUID();
+  } else if (!isSafeIngestId(sessionId)) {
+    return c.json({ error: 'Invalid sessionId (expected UUID)' }, 400);
+  }
+
+  const seedUrl = typeof body.seedUrl === 'string' ? body.seedUrl.trim() : '';
+  if (!seedUrl) {
+    return c.json({ error: 'seedUrl is required' }, 400);
+  }
+
+  const t0 = Date.now();
+  ingestBusy = true;
+  try {
+    const result = await ingestWebCrawl({
+      dataDir: DATA_DIR,
+      auditor: brain.getLaw25Auditor(),
+      seedUrl,
+      geminiApiKey: GEMINI_API_KEY,
+      visionOnIngest: GEMINI_VISION_ON_INGEST,
+      maxPages: Number.isFinite(body.maxPages) ? body.maxPages : undefined,
+      maxDepth: Number.isFinite(body.maxDepth) ? body.maxDepth : undefined,
+      maxTotalBytes: WEB_CRAWL_MAX_TOTAL_BYTES_ENV,
+      attestationAccepted: body.attestationAccepted === true,
+      allowedHosts: Array.isArray(body.allowedHosts)
+        ? body.allowedHosts.filter((h: unknown): h is string => typeof h === 'string' && h.trim() !== '')
+        : undefined,
+      ignoreRobots: body.ignoreRobots === true
+    });
+    await sessionStore.setDocumentIngest(sessionId, result.ingestId);
+    const cj = result.manifest.crawlJob;
+    ingestStats.crawlOk += 1;
+    console.log(
+      JSON.stringify({
+        event: 'web_crawl_complete',
+        ingestId: result.ingestId,
+        sessionId,
+        seedUrl: result.manifest.seedUrl,
+        maskedTextChars: result.manifest.maskedTextChars,
+        crawlJob: cj,
+        skippedByRobots: cj?.skippedByRobots,
+        skippedByPolicy: cj?.skippedByPolicy,
+        ignoreRobotsApplied: cj?.ignoreRobotsApplied === true,
+        durationMs: Date.now() - t0
+      })
+    );
+    return c.json({
+      ingestId: result.ingestId,
+      sessionId,
+      manifest: result.manifest,
+      maskedTextChars: result.manifest.maskedTextChars,
+      sourceFiles: result.sourceFiles
+    });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    ingestStats.uploadFailures += 1;
+    const diagnostics = e instanceof WebCrawlIngestError ? e.diagnostics : undefined;
+    console.log(
+      JSON.stringify({
+        event: 'web_crawl_error',
+        message,
+        sessionId,
+        durationMs: Date.now() - t0,
+        ...(diagnostics
+          ? {
+              crawlDiagnosticsSummary: {
+                originsWithRobots: Object.keys(diagnostics.robotsTxtByOrigin),
+                pagesTried: diagnostics.pagesTried.length,
+                lastHtmlFetchError: diagnostics.lastHtmlFetchError
+              }
+            }
+          : {})
+      })
+    );
+    console.error('web crawl ingest failed', e);
+    return c.json(
+      diagnostics ? { error: message, crawlDiagnostics: diagnostics } : { error: message },
+      500
+    );
+  } finally {
+    ingestBusy = false;
   }
 });
 
@@ -253,11 +367,13 @@ app.post('/api/tasks', async (c) => {
   const taskType = body.taskType?.trim() || 'general';
   let description = body.description?.trim() ?? '';
 
-  if (taskType === 'document_teach') {
+  if (taskType === 'document_teach' || taskType === 'web_teach') {
     const sessionIdRaw = body.sessionId?.trim();
     if (!sessionIdRaw) {
       return c.json(
-        { error: 'sessionId is required for document_teach (use sessionId returned by POST /api/teach/upload)' },
+        {
+          error: `sessionId is required for ${taskType} (use sessionId returned by POST /api/teach/upload or /api/teach/crawl)`
+        },
         400
       );
     }
@@ -267,27 +383,53 @@ app.post('/api/tasks', async (c) => {
     const sessionId = sessionIdRaw;
     const ingestId = body.ingestId?.trim();
     if (!ingestId) {
-      return c.json({ error: 'ingestId is required for document_teach (use POST /api/teach/upload first)' }, 400);
+      return c.json(
+        {
+          error: `ingestId is required for ${taskType} (run POST /api/teach/upload or POST /api/teach/crawl first)`
+        },
+        400
+      );
     }
     const bound = await sessionStore.load(sessionId);
     if (!bound?.documentIngestId || bound.documentIngestId !== ingestId) {
       return c.json(
-        { error: 'ingestId does not match this session; upload documents again for this session' },
+        { error: 'ingestId does not match this session; run upload or crawl again for this session' },
         403
       );
     }
     const loaded = await loadDocumentIngest(DATA_DIR, ingestId);
     if (!loaded) {
-      return c.json({ error: 'Unknown or empty ingest; upload again' }, 400);
+      return c.json({ error: 'Unknown or empty ingest; upload or crawl again' }, 400);
+    }
+    if (taskType === 'web_teach' && loaded.source !== 'web_crawl') {
+      return c.json({ error: 'web_teach requires an ingest produced by POST /api/teach/crawl' }, 400);
     }
     const documentTeach = {
       ingestId,
       maskedDocumentText: loaded.maskedCombinedText,
       sourceFiles: loaded.sourceFiles,
-      focusNote: body.focusNote?.trim()
+      focusNote: body.focusNote?.trim(),
+      ...(loaded.source ? { source: loaded.source } : {}),
+      ...(loaded.crawlJob && loaded.seedUrl
+        ? {
+            crawlSummary: {
+              seedUrl: loaded.seedUrl,
+              skippedByRobots: loaded.crawlJob.skippedByRobots,
+              skippedByPolicy: loaded.crawlJob.skippedByPolicy,
+              skippedBySsr: loaded.crawlJob.skippedBySsr,
+              skippedByCap: loaded.crawlJob.skippedByCap,
+              pagesFetched: loaded.crawlJob.pagesFetched,
+              assetsFetched: loaded.crawlJob.assetsFetched
+            }
+          }
+        : {})
     };
     if (!description) {
-      description = `Teach from uploaded documents: ${loaded.sourceFiles.map((f) => f.name).join(', ')}`;
+      if (loaded.source === 'web_crawl') {
+        description = `Teach from web crawl: ${loaded.seedUrl ?? ingestId}`;
+      } else {
+        description = `Teach from uploaded documents: ${loaded.sourceFiles.map((f) => f.name).join(', ')}`;
+      }
     }
     const { priorTurns } = await sessionStore.appendUser(sessionId, description);
     busy = true;

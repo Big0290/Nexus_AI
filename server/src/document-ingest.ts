@@ -15,11 +15,48 @@ export interface IngestedFileMeta {
   visionUsed?: boolean;
 }
 
+export type IngestSourceKind = 'upload' | 'web_crawl';
+
+export interface CrawlPageRecord {
+  url: string;
+  depth: number;
+  extractedChars: number;
+  statusCode?: number;
+  skippedReason?: 'robots' | 'policy' | 'ssrf' | 'fetch' | 'duplicate' | 'cap' | 'non_html';
+  /** Page text came from Playwright after a failed or non-HTML plain fetch. */
+  recoveredViaHeadless?: boolean;
+}
+
+export interface CrawlAssetRecord {
+  url: string;
+  mime: string;
+  extractedChars: number;
+  skippedReason?: string;
+}
+
+export interface CrawlJobAudit {
+  attestationAccepted?: boolean;
+  /** When true, crawl did not enforce robots.txt (dev/testing only; requires server env). */
+  ignoreRobotsApplied?: boolean;
+  skippedByRobots: number;
+  skippedByPolicy: number;
+  skippedBySsr: number;
+  skippedByCap: number;
+  pagesFetched: number;
+  assetsFetched: number;
+}
+
 export interface IngestManifest {
   ingestId: string;
   createdAt: string;
   files: IngestedFileMeta[];
   maskedTextChars: number;
+  /** Set for web crawl ingests */
+  source?: IngestSourceKind;
+  seedUrl?: string;
+  pages?: CrawlPageRecord[];
+  assets?: CrawlAssetRecord[];
+  crawlJob?: CrawlJobAudit;
 }
 
 const TEXT_MIMES = new Set([
@@ -181,7 +218,8 @@ export async function ingestUploadedFiles(opts: {
     ingestId,
     createdAt: new Date().toISOString(),
     files: fileMetas,
-    maskedTextChars: masked.text.length
+    maskedTextChars: masked.text.length,
+    source: 'upload'
   };
   await writeFile(join(baseDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
 
@@ -201,6 +239,9 @@ export async function loadDocumentIngest(
 ): Promise<{
   maskedCombinedText: string;
   sourceFiles: { name: string; mime: string }[];
+  source?: IngestSourceKind;
+  crawlJob?: CrawlJobAudit;
+  seedUrl?: string;
 } | null> {
   if (!isSafeIngestId(ingestId)) return null;
   const baseDir = join(dataDir, 'uploads', ingestId);
@@ -210,7 +251,13 @@ export async function loadDocumentIngest(
     const maskedCombinedText = await readFile(join(baseDir, 'masked.txt'), 'utf8');
     const sourceFiles = manifest.files.map((f) => ({ name: f.name, mime: f.mime }));
     if (!maskedCombinedText.trim()) return null;
-    return { maskedCombinedText, sourceFiles };
+    return {
+      maskedCombinedText,
+      sourceFiles,
+      ...(manifest.source ? { source: manifest.source } : {}),
+      ...(manifest.crawlJob ? { crawlJob: manifest.crawlJob } : {}),
+      ...(manifest.seedUrl ? { seedUrl: manifest.seedUrl } : {})
+    };
   } catch {
     return null;
   }

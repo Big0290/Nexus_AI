@@ -64,3 +64,53 @@ export function syntheticInterpretationForDocumentTeach(
     intakeAcknowledgment
   });
 }
+
+/**
+ * Intake for web_teach (or document_teach backed by a web crawl ingest).
+ */
+export function syntheticInterpretationForWebTeach(
+  userDescription: string,
+  doc: DocumentTeachRunOptions,
+  primaryCategoryHint?: string
+): InterpretationResult {
+  const names = doc.sourceFiles.map((f) => f.name).join(', ');
+  const seed = doc.crawlSummary?.seedUrl ?? '';
+  const goal = doc.focusNote?.trim()
+    ? `${userDescription.trim()} — Focus: ${doc.focusNote.trim()}`
+    : userDescription.trim() || `Learn from crawled web content (${seed || names || doc.ingestId})`;
+
+  const basePrimary = primaryCategoryHint?.trim() || 'knowledge';
+  const categorySet: string[] = [basePrimary, 'web_teach', 'web_crawl'];
+  categorySet.push(...keywordCategories(userDescription));
+  categorySet.push(...keywordCategories(names));
+
+  const cs = doc.crawlSummary;
+  const crawlNote = cs
+    ? `Crawl: seed ${cs.seedUrl}; pages=${cs.pagesFetched} assets=${cs.assetsFetched}; skipped robots=${cs.skippedByRobots} policy=${cs.skippedByPolicy}.`
+    : '';
+
+  const uniquePreview = [...new Set(categorySet)].slice(0, 12).join(', ');
+  const intakeAcknowledgment = `Synthetic intake: ${uniquePreview}. ${crawlNote} Content was fetched with robots.txt checks and rate limits; it may be incomplete or outdated. Ingest id: ${doc.ingestId}.`;
+
+  return normalizeInterpretationResult({
+    interpretedGoal: goal.slice(0, 2000),
+    canonicalQuery: `${userDescription.trim()} ${seed} ${names}`.slice(0, 500),
+    primaryCategory: basePrimary,
+    categories: categorySet,
+    tags: ['source:web_crawl', `ingest:${doc.ingestId}`].slice(0, 20),
+    constraints: [
+      'Extracted text was Law 25–masked before model calls.',
+      'Operator attested right to process the target site where required by deployment policy.'
+    ],
+    assumptions: [
+      'Web-derived text may omit JS-only content unless headless rendering was used server-side.',
+      'Publication dates and version accuracy are not guaranteed.',
+      'Linked documents (e.g. PDFs) were only fetched when allowed by scope and robots.txt.'
+    ],
+    clarificationsNeeded: [],
+    confidence: 0.85,
+    memoryLinks: [],
+    synthesizedLessons: ['Prefer citing page or document URLs from source names when storing facts from web crawl.'],
+    intakeAcknowledgment
+  });
+}

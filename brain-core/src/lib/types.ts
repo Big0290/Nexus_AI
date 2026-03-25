@@ -194,6 +194,18 @@ export interface DocumentTeachRunOptions {
   sourceFiles: { name: string; mime: string }[];
   /** User focus / instructions (optional) */
   focusNote?: string;
+  /** `web_crawl` when ingest came from POST /api/teach/crawl */
+  source?: 'upload' | 'web_crawl';
+  /** Crawl job audit (no secrets; URLs and counts only) */
+  crawlSummary?: {
+    seedUrl: string;
+    skippedByRobots: number;
+    skippedByPolicy: number;
+    skippedBySsr?: number;
+    skippedByCap?: number;
+    pagesFetched: number;
+    assetsFetched: number;
+  };
 }
 
 export interface TaskRunResult {

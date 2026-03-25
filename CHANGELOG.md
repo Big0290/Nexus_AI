@@ -8,7 +8,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) (sec
 
 ## [Unreleased]
 
-- _(Add new items under the next dated heading when you ship work.)_
+- _(Use a new dated section below when you merge a batch of work.)_
+
+---
+
+## 2026-03-23 — Web crawl ingest, `web_teach`, redirect SSRF hardening
+
+### Added
+
+- **Web crawl → masked ingest**: `server/src/web-crawl-ingest.ts` (helpers for SSRF, bounded fetch, sitemap loc parsing, optional Playwright). Honors **`robots.txt`**, per-host delays, scope/allowlist, linked assets (e.g. PDF) via **`extractTextFromFile`**, **Law25Auditor** masking, manifest fields `source: 'web_crawl'`, `pages` / `assets` / **`crawlJob`** audit.
+- **`POST /api/teach/crawl`**: JSON ingest (shared **`ingestBusy`** mutex with upload). **`ingestStats.crawlOk`** and **`GET /api/health`** expose **`ingestBusy`** (plus **`uploadBusy`** alias).
+- **`web_teach`**: `POST /api/tasks` with crawl-bound ingest; **`DocumentTeachRunOptions.source` / `crawlSummary`**; **`syntheticInterpretationForWebTeach`**, **`buildWebLearnerSystemPrompt`**. Crawl-backed ingests can still use **`document_teach`**; the orchestrator uses web-flavored intake when **`source === 'web_crawl'`**.
+- **UI / API client**: **`postTeachCrawl`**, **`postWebTeachTask`**, crawl form on **`DocumentTeachPanel`** (caps, allowlist, attestation checkbox).
+- **Optional auth for crawl** (allowlisted hosts only): **`WEB_CRAWL_AUTH_COOKIE`**, **`WEB_CRAWL_AUTH_BEARER`**, **`WEB_CRAWL_AUTH_ORIGINS`** (secrets never in manifest or API responses).
+- **Tests**: **`web-crawl-fetch.test.ts`** (redirect + **`validateBeforeFetch`**), **`web-crawl-integration.test.ts`** (local HTTP server + HTML + linked PDF fixture **`src/fixtures/sample.pdf`**), plus existing crawl unit tests.
+
+### Security
+
+- **SSRF on HTTP redirects**: **`fetchBounded`** accepts **`validateBeforeFetch`** and runs it on **every** redirect hop; crawl, sitemap, assets, and **`robots.txt`** (locked to the same hostname as that origin) wire in policy/DNS checks.
+
+### Documentation
+
+- **README**: Web crawl API, env table (limits, sitemap, headless, auth, attestation), Law 25 / DPIA notes for crawl, Playwright browser install note.
+
+### Changed
+
+- **Upload manifests** now set **`source: 'upload'`** for clarity; **`loadDocumentIngest`** returns optional **`source`**, **`seedUrl`**, **`crawlJob`**.
 
 ---
 

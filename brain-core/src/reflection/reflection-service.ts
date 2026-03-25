@@ -281,6 +281,77 @@ The specialist must output the Markdown sections described in the base instructi
     return text || base;
   }
 
+  /**
+   * Specialist system prompt for web_teach: same structure as document teach, with web provenance caveats.
+   */
+  async buildWebLearnerSystemPrompt(
+    taskDescription: string,
+    plan: StrategyPlan,
+    sessionTranscript: string | undefined,
+    interpretation: InterpretationResult | undefined,
+    promptOpts?: ReflectionPromptOpts
+  ): Promise<string> {
+    const mask = promptOpts?.mask ?? ((t: string) => t);
+    const sessionBlock = sessionTranscript?.trim()
+      ? `\nSession context:\n${mask(sessionTranscript.trim())}\n`
+      : '';
+    const intakeBlock = interpretationBlock(interpretation, mask);
+
+    const base = `You are a Learner specialist for Nexus Brain. Your job is to read the user's focus and web-derived text (already PII-masked) and produce a structured knowledge summary suitable for long-term storage.
+
+The content may be incomplete, outdated, or missing JS-rendered sections. Treat source names as canonical URLs when present.
+
+Output MUST use this Markdown structure:
+## Summary
+(3–8 sentences)
+
+## Key facts
+- Bullet list of concrete facts (with source URL in parentheses when inferable from filenames)
+
+## Entities
+- Named entities, products, dates, metrics (if any)
+
+## Glossary / terms
+- Term: short definition (only if present in the text)
+
+## Uncertainties / gaps
+- What could not be determined; note crawl/robots limitations where relevant
+
+## Suggested tags
+- comma-separated short tags for search
+
+Be faithful to the text; do not invent citations. If the content is empty or unreadable, say so clearly.`;
+
+    if (this.mockMode || !this.model) {
+      return [
+        base,
+        sessionBlock.trim(),
+        intakeBlock.trim(),
+        `User focus / request: ${mask(taskDescription)}`,
+        `Plan context: ${mask(plan.summary)}`,
+        `Steps to consider: ${plan.steps.map((s) => mask(s)).join(' | ')}`
+      ].join('\n\n');
+    }
+
+    const planForModel = {
+      ...plan,
+      summary: mask(plan.summary),
+      steps: plan.steps.map((s) => mask(s)),
+      lessonsApplied: plan.lessonsApplied.map((s) => mask(s))
+    };
+
+    const prompt = `Write a concise system prompt for a "Learner" specialist that extracts knowledge from web-crawled, masked text.
+User focus: ${mask(taskDescription)}
+${sessionBlock}${intakeBlock}
+Plan JSON: ${JSON.stringify(planForModel)}
+
+The specialist must output the Markdown sections described in the base instructions. Emphasize uncertainty about freshness and coverage. Output ONLY the system prompt text, no JSON wrapper.`;
+
+    const res = await this.model.generateContent(prompt);
+    const text = res.response.text().trim();
+    return text || base;
+  }
+
   summarizeLessons(memories: OutcomeMemory[]): string {
     return memories
       .slice(0, 10)
